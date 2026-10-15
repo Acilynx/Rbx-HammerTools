@@ -35,6 +35,8 @@ def main(argv=None) -> int:
     region = (a.region[:3], a.region[3:]) if a.region else None
     res = build(vmf, fsys, bsp, BuildOptions(region=region, textures=fsys is not None,
                                              lights=bsp is not None, verify=not a.no_verify))
+    import os
+    res.meta["map"] = os.path.splitext(os.path.basename(a.vmf))[0].removesuffix("_d")
     size = write_package(a.out, res.meta, res.images)
     print(f"wrote {a.out} ({size / 1e6:.2f} MB)")
     print(json.dumps(res.report, indent=1, default=str))
