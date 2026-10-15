@@ -1,0 +1,44 @@
+# --- Never commit game content -------------------------------------------
+# Everything below is extracted from or derived from a Source game install
+# (Valve's content). It is generated locally and must stay out of the repo.
+*.vmf
+*.vmx
+*.bsp
+*.vpk
+*.vtf
+*.vmt
+*.mdl
+*.vvd
+*.vtx
+*.phy
+*.pcf
+*.wav
+*.mp3
+*.htmp
+*.bin
+out/
+extracted/
+cache/
+
+# Images are only allowed under docs/ (our own screenshots/diagrams)
+*.png
+*.jpg
+*.tga
+!docs/**/*.png
+!docs/**/*.jpg
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# --- Editors / OS ------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

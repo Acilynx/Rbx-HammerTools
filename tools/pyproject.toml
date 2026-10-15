@@ -1,0 +1,15 @@
+[project]
+name = "vmf2rbx"
+version = "0.1.0"
+description = "Translate Hammer (Source engine) maps into Roblox map packages"
+requires-python = ">=3.10"
+dependencies = ["srctools>=2.4", "numpy>=1.24", "pillow>=10"]
+
+[project.scripts]
+vmf2rbx = "vmf2rbx.cli:main"
+
+[tool.setuptools]
+packages = ["vmf2rbx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
