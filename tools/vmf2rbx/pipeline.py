@@ -135,6 +135,20 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         with open(opts.rtx_usda, encoding="utf-8", errors="replace") as fh:
             reps = rtx.parse_replacements(fh.read())
         matched = rtx.match_materials(fsys, sorted(images), reps)
+        # Portal RTX remodelled some props (new meshes, new UV layouts). Their materials point at
+        # newly authored textures (T_Fixture_CubeDropperArms_...) that don't fit the original
+        # model's UVs. Textures remastered from the original keep its hash in the file name
+        # (EC997E9AC116F8A3.dds, ..._albedo.dds) and keep its layout. Brush faces always keep
+        # their UVs in Remix, so this only applies to materials used by props alone.
+        brush_mats = {s.material for b, _ in built for s in b.visible_sides}
+        for m in list(matched):
+            if m in brush_mats:
+                continue
+            h = matched[m]["hash"]
+            paths = [v for k, v in matched[m].items() if k in rtx.CHANNELS]
+            if not any(h in p.upper() for p in paths):
+                del matched[m]
+                rep["prop materials skipped: RTX remodel textures"] += 1
         texs = rtx.read_rtxb(opts.rtxb)
         for m, info in matched.items():
             def get(ch):
