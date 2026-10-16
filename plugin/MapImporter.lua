@@ -201,7 +201,7 @@ end
 -- Textures pick up a new image when the property is set. A SurfaceAppearance doesn't: it only
 -- reads its maps when it's parented (setting them on a parented one draws nothing, or drops
 -- maps), so each SurfaceAppearance is replaced by a clone carrying the new images.
-local MAP_PROPS = { "ColorMapContent", "NormalMapContent", "RoughnessMapContent", "MetalnessMapContent" }
+local MAP_PROPS = { "ColorMapContent", "NormalMapContent", "RoughnessMapContent", "MetalnessMapContent", "EmissiveMaskContent" }
 
 function MapImporter.refreshImages(root: Instance): number
 	local textureUsers: { [EditableImage]: { { any } } } = {}
@@ -340,7 +340,9 @@ function MapImporter.build(contents: string, options: Options?)
 		local r = variantFor(key .. "#r", swap, fx, fy)
 			or (if consts.r then flatImage(consts.r) elseif opts.matte ~= false then flatImage(255) else nil)
 		local m = variantFor(key .. "#m", swap, fx, fy) or (if consts.m then flatImage(consts.m) else nil)
-		return n, r, m
+		-- glow: Portal RTX emissive mask or Source $selfillum mask
+		local e = variantFor(key .. "#e", swap, fx, fy) or (if consts.e then flatImage(consts.e) else nil)
+		return n, r, m, e, consts.es or 1
 	end
 
 	local byBrush: { [number]: { BasePart } } = {}
@@ -408,10 +410,14 @@ function MapImporter.build(contents: string, options: Options?)
 					t.StudsPerTileU, t.StudsPerTileV = su, sv
 					t.OffsetStudsU, t.OffsetStudsV = ou, ov
 					t.ColorMapContent = Content.fromObject(img)
-					local nImg, rImg, mImg = pbrFor(imgKey or mat, mat, swap, fx, fy)
+					local nImg, rImg, mImg, eImg, eStrength = pbrFor(imgKey or mat, mat, swap, fx, fy)
 					if nImg then t.NormalMapContent = Content.fromObject(nImg) end
 					if rImg then t.RoughnessMapContent = Content.fromObject(rImg) end
 					if mImg then t.MetalnessMapContent = Content.fromObject(mImg) end
+					if eImg then
+						t.EmissiveMaskContent = Content.fromObject(eImg)
+						t.EmissiveStrength = eStrength
+					end
 					t.Parent = p
 					counts.textures += 1
 					local mm = meta.materials[mat]
@@ -507,10 +513,14 @@ function MapImporter.build(contents: string, options: Options?)
 					if img then
 						local sa = Instance.new("SurfaceAppearance")
 						sa.ColorMapContent = Content.fromObject(img)
-						local nImg, rImg, mImg = pbrFor(sm.material, sm.material, false, false, false)
+						local nImg, rImg, mImg, eImg, eStrength = pbrFor(sm.material, sm.material, false, false, false)
 						if nImg then sa.NormalMapContent = Content.fromObject(nImg) end
 						if rImg then sa.RoughnessMapContent = Content.fromObject(rImg) end
 						if mImg then sa.MetalnessMapContent = Content.fromObject(mImg) end
+						if eImg then
+							sa.EmissiveMaskContent = Content.fromObject(eImg)
+							sa.EmissiveStrength = eStrength
+						end
 						local mm = meta.materials[sm.material]
 						if mm and mm.alpha then
 							sa.AlphaMode = Enum.AlphaMode.Transparency

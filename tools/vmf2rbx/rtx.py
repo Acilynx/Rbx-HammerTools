@@ -50,20 +50,46 @@ def remix_hash(vtf_bytes: bytes) -> str | None:
     return None if m is None else xxhash.xxh64_hexdigest(m).upper()
 
 
-def parse_replacements(usda_text: str) -> dict[str, dict[str, str]]:
-    """mat_<HASH> blocks in a Remix replacement layer -> {HASH: {channel: texture path}}."""
-    starts = [(m.start(), m.group(1)) for m in re.finditer(r'over "mat_([0-9A-F]{16})"', usda_text)]
+def _block_end(text: str, open_brace: int) -> int:
+    """Index of the brace closing the one at `open_brace` (skipping quoted strings)."""
+    depth, k, n = 0, open_brace, len(text)
+    while k < n:
+        c = text[k]
+        if c == '"':
+            k = text.index('"', k + 1)
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return k
+        k += 1
+    return n
+
+
+def parse_replacements(usda_text: str) -> dict[str, dict]:
+    """mat_<HASH> blocks in a Remix replacement layer -> {HASH: {channel: texture path,
+    "encoding": normal map encoding, "emissive_intensity": float}}.
+
+    Each block is cut at its own closing brace: mesh and light overrides sit between material
+    blocks and carry their own textures (cutting at the next "mat_" instead gave the office
+    floor the observation glass's textures)."""
     out = {}
-    for i, (pos, h) in enumerate(starts):
-        end = starts[i + 1][0] if i + 1 < len(starts) else len(usda_text)
-        block = usda_text[pos:end]
-        tex = {ch: path for ch, path in re.findall(r"asset inputs:(\w+)_texture = @\./([^@]+)@", block)
-               if ch in CHANNELS}
+    for m in re.finditer(r'over "mat_([0-9A-F]{16})"', usda_text):
+        h = m.group(1)
+        brace = usda_text.index("{", m.end())
+        block = usda_text[m.start(): _block_end(usda_text, brace) + 1]
+        tex = out.setdefault(h, {})
+        for ch, path in re.findall(r"asset inputs:(\w+)_texture = @\./([^@]+)@", block):
+            if ch in CHANNELS:
+                tex[ch] = path
         enc = re.search(r"int inputs:encoding = (\d)", block)
-        if tex and enc:
+        if enc:
             tex["encoding"] = int(enc.group(1))
-        out[h] = tex
-    return out
+        ei = re.search(r"float inputs:emissive_intensity = ([-\d.e]+)", block)
+        if ei:
+            tex["emissive_intensity"] = float(ei.group(1))
+    return {h: t for h, t in out.items()}
 
 
 def match_materials(fsys, materials, replacements) -> dict[str, dict]:

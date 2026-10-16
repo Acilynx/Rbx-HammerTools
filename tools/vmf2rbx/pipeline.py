@@ -48,6 +48,8 @@ def _part_record(b: Brush, p: PartSpec, faces) -> dict:
 
 
 MAX_IMAGE = 1024
+EMISSIVE_PER_RTX = 0.15                 # Roblox EmissiveStrength per unit of Remix emissive_intensity
+EMISSIVE_MIN, EMISSIVE_MAX = 0.5, 4.0   # (set by eye; Remix signs use 7-20)
 
 VOLUME_WARN = 1e-3   # relative; decompiled VMFs carry float noise (planes ~0.03 deg off parallel)
 VOLUME_FAIL = 1e-2
@@ -172,9 +174,37 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                         consts[k] = g
                     else:
                         maps[k] = g
+            e = get("emissive_mask")
+            if e is not None:
+                g = rtx.gray_map(e.image.convert("L").convert("RGBA"))
+                strength = min(EMISSIVE_MAX, max(EMISSIVE_MIN, info.get("emissive_intensity", 7.0) * EMISSIVE_PER_RTX))
+                if isinstance(g, int):
+                    if g > 8:
+                        consts["e"], consts["es"] = g, strength
+                else:
+                    maps["e"], consts["es"] = g, strength
             if maps or consts or d is not None:
                 pbr[m], pbr_const[m] = maps, dict(consts, rtx=info["hash"])
                 rep["materials with Portal RTX maps"] += 1
+
+    # --- glow: Source $selfillum where Portal RTX didn't supply an emissive mask
+    for m in list(images):
+        info = mats.get(m)
+        if info is None or not info.self_illum or "e" in pbr.get(m, {}) or "e" in pbr_const.get(m, {}):
+            continue
+        mask = assets.load_selfillum_mask(fsys, info)
+        if mask is None:
+            continue
+        from . import rtx as _rtx
+        g = _rtx.gray_map(Image.merge("RGBA", (mask, mask, mask, mask)))
+        if isinstance(g, int):
+            if g <= 8:
+                continue
+            pbr_const.setdefault(m, {})["e"] = g
+        else:
+            pbr.setdefault(m, {})["e"] = g
+        pbr_const.setdefault(m, {})["es"] = 1.0
+        rep["materials glowing ($selfillum)"] += 1
 
     # --- lights (also tells us which materials are texture lights)
     light_rep = None

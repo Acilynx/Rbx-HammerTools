@@ -137,6 +137,20 @@ def resolve_material(fsys, name: str, _depth=0) -> MaterialInfo:
     return MaterialInfo(name, root.real_name, params)
 
 
+def load_selfillum_mask(fsys, mat: MaterialInfo) -> Image.Image | None:
+    """Source $selfillum mask as a greyscale image: $selfillummask's red channel if given,
+    else the base texture's alpha (which load_base_image throws away for opaque materials)."""
+    from srctools.vtf import VTF
+    tex = mat.params.get("$selfillummask") or mat.base_texture
+    if not tex:
+        return None
+    data = _read(fsys, f"materials/{tex.lower().replace(chr(92), '/')}.vtf")
+    if data is None:
+        return None
+    img = VTF.read(BytesIO(data)).get().to_PIL().convert("RGBA")
+    return img.getchannel("R" if "$selfillummask" in mat.params else "A")
+
+
 ADDITIVE_OPACITY = 0.6     # full white additive pixel -> this opacity (set by eye)
 
 
