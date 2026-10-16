@@ -118,12 +118,73 @@ class MaterialInfo:
         return [int(round(255 * min(1, max(0, c)))) for c in nums]
 
 
+_KV_TOKEN = re.compile(r'"([^"]*)"?|([{}])|([^\s{}"]+)')
+
+
+def parse_vmt_lenient(text: str) -> Keyvalues:
+    """KeyValues the way Source's own loader reads them, for VMTs srctools rejects (38 of
+    Portal's 5999 materials). Source accepts:
+      "$envmaptint" .6 .6 .6     -> key, value ".6", then the stray tokens pair up ("Cannot
+                                    have multiple names on the same line" in srctools)
+      a missing closing brace    -> the file just ends
+      /* ... */, stray ";"       -> skipped here (Source would read them as junk keys)
+    Unquoted [$X360]-style conditionals after a value are dropped."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    toks = []
+    for q, brace, word in _KV_TOKEN.findall(text):
+        if brace:
+            toks.append(brace)
+        elif word:
+            if word.startswith("[") or word == ";":
+                continue
+            toks.append(("s", word))
+        else:
+            toks.append(("s", q))
+    pos = 0
+
+    def block() -> list:
+        nonlocal pos
+        items = []
+        while pos < len(toks):
+            t = toks[pos]
+            pos += 1
+            if t == "}":
+                break
+            if t == "{":                      # brace with no key: read and drop
+                block()
+                continue
+            key = t[1]
+            nxt = toks[pos] if pos < len(toks) else "}"
+            if nxt == "{":
+                pos += 1
+                items.append(Keyvalues(key, block()))
+            elif nxt == "}":
+                items.append(Keyvalues(key, ""))
+            else:
+                pos += 1
+                items.append(Keyvalues(key, nxt[1]))
+        return items
+
+    return Keyvalues.root(*block())
+
+
+def parse_vmt(text: str) -> Keyvalues:
+    try:
+        return Keyvalues.parse(text, allow_escapes=False)   # "models\props\box..." isn't \b
+    except Exception:
+        return parse_vmt_lenient(text)
+
+
 def resolve_material(fsys, name: str, _depth=0) -> MaterialInfo:
     data = _read(fsys, f"materials/{name}.vmt")
     if data is None:
         return MaterialInfo(name, missing=True)
-    kv = Keyvalues.parse(data.decode("utf-8", "replace"), allow_escapes=False)   # "models\props\box..." isn't \b
-    root = list(kv)[0]
+    kv = parse_vmt(data.decode("utf-8", "replace"))
+    blocks = [b for b in kv if b.has_children()]
+    if not blocks:
+        return MaterialInfo(name, missing=True)
+    root = blocks[0]
     params = {c.name.lower(): c.value for c in root if not c.has_children()}
     if root.real_name.lower() == "patch" and _depth < 8:
         inc = params.get("include", "").lower().replace("\\", "/")
