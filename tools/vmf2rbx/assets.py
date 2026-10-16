@@ -96,6 +96,10 @@ class MaterialInfo:
         return self.params.get("$translucent") == "1" or self.params.get("$alphatest") == "1"
 
     @property
+    def additive(self) -> bool:
+        return self.params.get("$additive") == "1"
+
+    @property
     def self_illum(self) -> bool:
         return self.params.get("$selfillum") == "1"
 
@@ -145,4 +149,12 @@ def load_base_image(fsys, mat: MaterialInfo, frame: int = 0) -> Image.Image | No
     img = vtf.get(frame=min(frame, vtf.frame_count - 1)).to_PIL().convert("RGBA")
     if not mat.keeps_alpha:
         img.putalpha(255)
+    elif mat.additive:
+        # Roblox has no additive blending, so the alpha has to stand in for "how much this pixel
+        # shows". In Portal's additive frosted glass the alpha runs exactly opposite to the
+        # brightness (the bright frosted bands have the lowest alpha), and in game it's those
+        # bands that show while the rest is clear. Used as plain opacity it came out inverted
+        # (seen in Studio on testchmb_a_00's vault glass), so additive materials use 1 - alpha.
+        r, g, b, a = img.split()
+        img = Image.merge("RGBA", (r, g, b, a.point(lambda v: 255 - v)))
     return img
