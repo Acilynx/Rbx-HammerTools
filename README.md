@@ -36,6 +36,13 @@ and built packages. Tests use synthetic brushes only.
 
 ## Usage (PC side)
 
+The easy way: double-click **`Convert Map.bat`**. It opens a window where you pick the
+decompiled `.vmf`; it finds the game folder (from your Steam libraries) and the matching
+`.bsp` itself, and offers to install the Python packages it needs on first run. Needs Python 3
+from python.org (which includes tkinter).
+
+From the command line:
+
 ```
 pip install -e tools            # or: pip install -r tools/requirements.txt, then run from tools/
 python -m vmf2rbx build ^

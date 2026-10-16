@@ -36,6 +36,7 @@ def main(argv=None) -> int:
     from .package import write_package
     from .pipeline import BuildOptions, build
 
+    print("## reading map", file=sys.stderr, flush=True)
     with open(a.vmf, encoding="utf-8", errors="replace") as fh:
         vmf = VMF.parse(Keyvalues.parse(fh))
     fsys = None
@@ -44,9 +45,13 @@ def main(argv=None) -> int:
         fsys = open_game(a.game)
     bsp = open(a.bsp, "rb").read() if a.bsp else None
     region = (a.region[:3], a.region[3:]) if a.region else None
+    def progress(msg):
+        print(f"## {msg}", file=sys.stderr, flush=True)
     res = build(vmf, fsys, bsp, BuildOptions(region=region, textures=fsys is not None,
                                              lights=bsp is not None, verify=not a.no_verify,
-                                             rtx_usda=a.rtx_usda, rtxb=a.rtxb, props=not a.no_props))
+                                             rtx_usda=a.rtx_usda, rtxb=a.rtxb, props=not a.no_props,
+                                             progress=progress))
+    progress("writing package")
     import os
     res.meta["map"] = os.path.splitext(os.path.basename(a.vmf))[0].removesuffix("_d")
     size = write_package(a.out, res.meta, res.images, res.blobs)

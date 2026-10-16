@@ -27,6 +27,7 @@ class BuildOptions:
     rtx_albedo: bool = True            # use the RTX albedo instead of the original texture
     props: bool = True                 # prop_static / prop_dynamic / prop_physics as meshes
     overlays: bool = True              # info_overlay decals as thin parts
+    progress: object = None            # callable(str): stage messages, for the converter window
 
 
 @dataclass
@@ -81,6 +82,8 @@ def verify_decomposition(b: Brush, parts: list[PartSpec], rng, samples=2000, war
 
 
 def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = BuildOptions()) -> BuildResult:
+    say = opts.progress or (lambda msg: None)
+    say("reading brushes")
     brushes = load_vmf_brushes(vmf)
     if opts.region:
         lo, hi = map(np.asarray, opts.region)
@@ -89,6 +92,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     rep = Counter()
     problems, warnings = [], []
     built: list[tuple[Brush, list[PartSpec]]] = []
+    say(f"converting {len(brushes)} brushes")
     for b in brushes:
         if b.is_tool_only:
             rep["skipped tool-only brush"] += 1
@@ -105,6 +109,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     from . import assets
     used = sorted({s.material for b, _ in built for s in b.visible_sides})
 
+    say("loading props")
     # --- props (meshes per model; their materials join the texture loading below)
     prop_models, prop_blobs, prop_instances, prop_missing = {}, {}, [], []
     if opts.props and fsys is not None:
@@ -119,6 +124,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     used = sorted(set(used) | set(prop_mats) | set(overlay_mats))
     mats, images, sizes, avg_colors = {}, {}, {}, {}
     if opts.textures and fsys is not None:
+        say(f"loading {len(used)} materials")
         for m in used:
             info = assets.resolve_material(fsys, m)
             mats[m] = info
@@ -133,6 +139,8 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             images[m] = img
             avg_colors[m] = [int(round(c)) for c in np.asarray(img.convert("RGB"), float).reshape(-1, 3).mean(0)]
 
+    if opts.rtx_usda and opts.rtxb:
+        say("Portal RTX materials")
     # --- Portal RTX replacements: PBR maps (and albedo) for the materials it covers
     pbr, pbr_const = {}, {}
     if opts.rtxb and opts.rtx_usda and fsys is not None and images:
@@ -209,6 +217,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         pbr_const.setdefault(m, {})["es"] = 1.0
         rep["materials glowing ($selfillum)"] += 1
 
+    say("lights")
     # --- lights (also tells us which materials are texture lights)
     light_rep = None
     if opts.lights and bsp_bytes:
@@ -225,6 +234,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                                  keep_brush=lambda b: b.id in ids, keep_point=keep_point)
     texlight_mats = set(light_rep.texlights) if light_rep else set()
 
+    say("texturing faces")
     # --- textures per face
     parts_out = []
     baked = {}
@@ -250,6 +260,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                 rep["baked faces"] += sum(1 for f in faces if f.image)
             parts_out.append(_part_record(b, p, faces))
 
+    say("overlays")
     # --- overlays: thin see-through parts in front of the surfaces they decorate
     if opts.overlays:
         from .overlays import overlay_parts
