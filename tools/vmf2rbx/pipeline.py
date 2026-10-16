@@ -21,6 +21,9 @@ class BuildOptions:
     verify: bool = True                # volume + point test every decomposed brush
     texlights_as_neon: bool = True     # texture-light faces: Neon + light colour instead of an image
     bake_faces: bool = True            # faces at odd texture angles get their own baked image
+    rtx_usda: str | None = None        # Portal RTX replacement layer (portal_rtx_replacements.usda)
+    rtxb: str | None = None            # textures pulled by tools/rtx_extract.py
+    rtx_albedo: bool = True            # use the RTX albedo instead of the original texture
 
 
 @dataclass
@@ -106,6 +109,40 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             sizes[m] = (img.width, img.height)
             avg_colors[m] = [int(round(c)) for c in np.asarray(img.convert("RGB"), float).reshape(-1, 3).mean(0)]
 
+    # --- Portal RTX replacements: PBR maps (and albedo) for the materials it covers
+    pbr, pbr_const = {}, {}
+    if opts.rtxb and opts.rtx_usda and fsys is not None and images:
+        from . import rtx
+        with open(opts.rtx_usda, encoding="utf-8", errors="replace") as fh:
+            reps = rtx.parse_replacements(fh.read())
+        matched = rtx.match_materials(fsys, sorted(images), reps)
+        texs = rtx.read_rtxb(opts.rtxb)
+        for m, info in matched.items():
+            def get(ch):
+                return texs.get(rtx.norm(info[ch])) if ch in info else None
+            d = get("diffuse")
+            if d is not None and opts.rtx_albedo:
+                img = d.image.copy()
+                if not mats[m].keeps_alpha:
+                    img.putalpha(255)
+                images[m] = img                       # sizes[m] stays the original's: texel space
+                avg_colors[m] = [int(round(c)) for c in np.asarray(img.convert("RGB"), float).reshape(-1, 3).mean(0)]
+            maps, consts = {}, {}
+            n = get("normalmap")
+            if n is not None:
+                maps["n"] = rtx.encode_components(rtx.normal_components(n.image, info.get("encoding", rtx.OCTAHEDRAL)))
+            for ch, k in (("reflectionroughness", "r"), ("metallic", "m")):
+                t = get(ch)
+                if t is not None:
+                    g = rtx.gray_map(t.image)
+                    if isinstance(g, int):
+                        consts[k] = g
+                    else:
+                        maps[k] = g
+            if maps or consts or d is not None:
+                pbr[m], pbr_const[m] = maps, dict(consts, rtx=info["hash"])
+                rep["materials with Portal RTX maps"] += 1
+
     # --- lights (also tells us which materials are texture lights)
     light_rep = None
     if opts.lights and bsp_bytes:
@@ -129,7 +166,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         for p in parts:
             faces = []
             if sizes:
-                faces, skipped = texture_part(b, p, sizes, images, baked if opts.bake_faces else None)
+                faces, skipped = texture_part(b, p, sizes, images, baked if opts.bake_faces else None, pbr)
                 if opts.texlights_as_neon:
                     faces = [f for f in faces if f.material not in texlight_mats]
                 for why, m in skipped:
@@ -139,7 +176,10 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             parts_out.append(_part_record(b, p, faces))
     face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]}
     images = {m: img for m, img in images.items() if m in face_imgs}
-    images.update({k: img for k, img in baked.items() if k in face_imgs})
+    for m in list(images):
+        for k, arr in pbr.get(m, {}).items():
+            images[f"{m}#{k}"] = arr                  # importer: <image key>#n / #r / #m
+    images.update({k: img for k, img in baked.items() if k.split("#")[0] in face_imgs})
 
     spawn = None
     for e in vmf.entities:
@@ -156,7 +196,8 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                            selfillum=mats[m].self_illum if m in mats else False,
                            color=avg_colors.get(m),          # fallback for faces left untextured
                            texlight=light_rep.texlights.get(m) if light_rep else None,
-                           glass=mats[m].refract_tint if m in mats else None)   # Refract glass: tint
+                           glass=mats[m].refract_tint if m in mats else None,   # Refract glass: tint
+                           pbr=pbr_const.get(m))     # flat roughness/metalness values, RTX hash
                    for m in used},
         lights=dict(surface=light_rep.surface, points=light_rep.points) if light_rep else dict(surface=[], points=[]),
     )

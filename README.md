@@ -51,6 +51,9 @@ python -m vmf2rbx build ^
 * every decomposed brush is self-checked (volume + point sampling); failures are listed under
   `problems` in the printed report
 
+For Portal 1 maps with Portal with RTX installed, the build can also use its PBR materials;
+see `docs/portal-rtx.md`.
+
 Then in Studio: install the importer (see `plugin/ImporterPlugin.server.lua`), click
 **Import map** and pick `out/map.htmp`.
 

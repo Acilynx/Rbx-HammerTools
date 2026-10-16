@@ -9,6 +9,7 @@
 -- them in the edit place when a playtest ends). Publish mode (uploaded image assets) comes later.
 
 local AssetService = game:GetService("AssetService")
+local EncodingService = game:GetService("EncodingService")
 local HttpService = game:GetService("HttpService")
 
 local MapImporter = {}
@@ -42,13 +43,19 @@ local function readPackage(contents: string)
 	assert(buffer.readstring(data, 0, 4) == "HTMP", "not a map package (.htmp)")
 	local jlen = buffer.readu32(data, 4)
 	local meta = HttpService:JSONDecode(buffer.readstring(data, 8, jlen))
-	assert(meta.version == 1, "unsupported package version " .. tostring(meta.version))
+	assert(meta.version == 1 or meta.version == 2, "unsupported package version " .. tostring(meta.version))
 	return meta, data, 8 + jlen
 end
 
--- palette + indices -> RGBA buffer
+-- An image's pixels as stored: RGBA for palettized colour images, raw W*H*ch bytes for data
+-- maps (ch 1 = roughness/metalness, ch 2 = normal map right/down components).
 local function decodeImage(data: buffer, blob0: number, img): buffer
 	local W, H = img.w, img.h
+	if img.enc == "zstd" then
+		local packed = buffer.create(img.len)
+		buffer.copy(packed, 0, data, blob0 + img.off, img.len)
+		return EncodingService:DecompressBuffer(packed, Enum.CompressionAlgorithm.Zstd)
+	end
 	local palOff = blob0 + img.off
 	local idxOff = palOff + img.ncol * 4
 	local out = buffer.create(W * H * 4)
@@ -58,8 +65,28 @@ local function decodeImage(data: buffer, blob0: number, img): buffer
 	return out
 end
 
+-- EditableImages share a memory budget; when it runs out, the map loses that one map instead
+-- of the whole import failing.
+local imageFailures = 0
+local function newImage(size: Vector2, px: buffer): EditableImage?
+	local ok, img = pcall(function()
+		return AssetService:CreateEditableImage({ Size = size })
+	end)
+	if not ok or not img then
+		imageFailures += 1
+		return nil
+	end
+	img:WritePixelsBuffer(Vector2.zero, size, px)
+	return img
+end
+
 -- One of the 8 orientations of a W x H image: optional transpose, then optional flips.
-local function orient(base: buffer, W: number, H: number, swap: boolean, fx: boolean, fy: boolean)
+-- kind "color": RGBA pixels move. kind "gray": 1-channel map, written as grey RGBA.
+-- kind "normal": 2-channel (right, down) components; they move like pixels and also turn with
+-- the image: a transpose swaps them, a flip negates that axis (same as the translator's
+-- FaceBake.normal_matrix on 90-degree faces; tests/test_textures.py checks the two agree).
+-- Roblox reads normal maps as R = image right, G = image up, B = out of the surface.
+local function orient(base: buffer, W: number, H: number, swap: boolean, fx: boolean, fy: boolean, kind: string?)
 	local Nx, Ny = W, H
 	if swap then Nx, Ny = H, W end
 	local out = buffer.create(Nx * Ny * 4)
@@ -69,12 +96,39 @@ local function orient(base: buffer, W: number, H: number, swap: boolean, fx: boo
 			local sx = if fx then Nx - 1 - x else x
 			local bx, by = sx, sy
 			if swap then bx, by = sy, sx end
-			buffer.writeu32(out, (y * Nx + x) * 4, buffer.readu32(base, (by * W + bx) * 4))
+			local o = (y * Nx + x) * 4
+			local i = by * W + bx
+			if kind == "normal" then
+				local r = buffer.readu8(base, i * 2) / 127.5 - 1
+				local d = buffer.readu8(base, i * 2 + 1) / 127.5 - 1
+				if swap then r, d = d, r end
+				if fx then r = -r end
+				if fy then d = -d end
+				local z = math.sqrt(math.max(0, 1 - r * r - d * d))
+				buffer.writeu8(out, o, math.clamp(math.round((r + 1) * 127.5), 0, 255))
+				buffer.writeu8(out, o + 1, math.clamp(math.round((1 - d) * 127.5), 0, 255))
+				buffer.writeu8(out, o + 2, math.clamp(math.round((z + 1) * 127.5), 0, 255))
+				buffer.writeu8(out, o + 3, 255)
+			elseif kind == "gray" then
+				local g = buffer.readu8(base, i)
+				buffer.writeu32(out, o, 0xFF000000 + g * 0x10101)
+			else
+				buffer.writeu32(out, o, buffer.readu32(base, i * 4))
+			end
 		end
 	end
-	local img = AssetService:CreateEditableImage({ Size = Vector2.new(Nx, Ny) })
-	img:WritePixelsBuffer(Vector2.zero, Vector2.new(Nx, Ny), out)
-	return img
+	return newImage(Vector2.new(Nx, Ny), out)
+end
+
+local flatCache: { [number]: EditableImage } = {}
+-- A 4x4 single-value grey map (flat roughness or metalness), shared by every texture using it.
+local function flatImage(v: number): EditableImage?
+	if not flatCache[v] then
+		local px = buffer.create(4 * 4 * 4)
+		for i = 0, 15 do buffer.writeu32(px, i * 4, 0xFF000000 + v * 0x10101) end
+		flatCache[v] = newImage(Vector2.new(4, 4), px) :: any
+	end
+	return flatCache[v]
 end
 
 -- ------------------------------------------------------------------ helpers
@@ -106,29 +160,38 @@ end
 -- yielding, and all of them after a playtest (the pixels are still there; only the drawing is
 -- lost). Rebuilding each image once makes them draw again. The plugin calls this after the
 -- build and whenever a playtest ends.
-local MAP_PROPS = { "ColorMapContent", "RoughnessMapContent" }
+local MAP_PROPS = { "ColorMapContent", "NormalMapContent", "RoughnessMapContent", "MetalnessMapContent" }
 
 function MapImporter.refreshImages(root: Instance): number
-	local remap = {}
-	local made = 0
+	-- group the textures by image first, then swap one image at a time, so at most one extra
+	-- image exists at any moment (EditableImages share a memory budget)
+	local users: { [EditableImage]: { { any } } } = {}
 	for _, t in ipairs(root:GetDescendants()) do
 		if t:IsA("Texture") then
 			for _, prop in ipairs(MAP_PROPS) do
-				local old = (t :: any)[prop].Object
-				if old and old:IsA("EditableImage") then
-					if not remap[old] then
-						local sz = old.Size
-						local img = AssetService:CreateEditableImage({ Size = sz })
-						img:WritePixelsBuffer(Vector2.zero, sz, old:ReadPixelsBuffer(Vector2.zero, sz))
-						remap[old] = img
-						made += 1
-					end
-					(t :: any)[prop] = Content.fromObject(remap[old])
+				local img = (t :: any)[prop].Object
+				if img and img:IsA("EditableImage") then
+					users[img] = users[img] or {}
+					table.insert(users[img], { t, prop })
 				end
 			end
 		end
 	end
-	for old in pairs(remap) do old:Destroy() end
+	local made = 0
+	for old, list in pairs(users) do
+		local sz = old.Size
+		local ok, img = pcall(function()
+			return AssetService:CreateEditableImage({ Size = sz })
+		end)
+		if ok and img then
+			img:WritePixelsBuffer(Vector2.zero, sz, old:ReadPixelsBuffer(Vector2.zero, sz))
+			for _, u in ipairs(list) do
+				u[1][u[2]] = Content.fromObject(img)
+			end
+			old:Destroy()
+			made += 1
+		end
+	end
 	return made
 end
 
@@ -188,27 +251,32 @@ function MapImporter.build(contents: string, options: Options?)
 	local imageMeta = {}
 	for _, im in ipairs(meta.images) do imageMeta[im.name] = im end
 	local bases: { [string]: buffer } = {}
-	local variants: { [string]: EditableImage } = {}
-	local function variantFor(mat: string, swap: boolean, fx: boolean, fy: boolean): EditableImage?
-		local im = imageMeta[mat]
+	local variants: { [string]: EditableImage | false } = {}
+	imageFailures = 0
+	table.clear(flatCache)
+	local function variantFor(name: string, swap: boolean, fx: boolean, fy: boolean): EditableImage?
+		local im = imageMeta[name]
 		if not im then return nil end
-		local key = mat .. "|" .. tostring(swap) .. tostring(fx) .. tostring(fy)
-		if not variants[key] then
-			bases[mat] = bases[mat] or decodeImage(data, blob0, im)
-			variants[key] = orient(bases[mat], im.w, im.h, swap, fx, fy)
+		local key = name .. "|" .. tostring(swap) .. tostring(fx) .. tostring(fy)
+		if variants[key] == nil then
+			bases[name] = bases[name] or decodeImage(data, blob0, im)
+			local kind = if im.enc ~= "zstd" then "color" elseif im.ch == 2 then "normal" else "gray"
+			variants[key] = orient(bases[name], im.w, im.h, swap, fx, fy, kind) or false
 		end
-		return variants[key]
+		return variants[key] or nil
 	end
 
-	-- Matte: Source's lightmapped surfaces have no specular unless the material asks for an
-	-- envmap; a part's default roughness makes every texture look polished. One shared
-	-- 4x4 white roughness map (white = fully rough) fixes that. PBR maps replace it later.
-	local roughness: EditableImage? = nil
-	if opts.matte ~= false then
-		roughness = AssetService:CreateEditableImage({ Size = Vector2.new(4, 4) })
-		local px = buffer.create(4 * 4 * 4)
-		buffer.fill(px, 0, 255)
-		roughness:WritePixelsBuffer(Vector2.zero, Vector2.new(4, 4), px)
+	-- PBR maps per face: <image key>#n / #r / #m from the package (Portal RTX), else flat values
+	-- from the material. Without any, textures get a flat full roughness (matte): Source's
+	-- lightmapped surfaces have no specular unless the material asks for an envmap, and a
+	-- part's default roughness makes every texture look polished.
+	local function pbrFor(key: string, mat: string, swap: boolean, fx: boolean, fy: boolean)
+		local consts = (meta.materials[mat] or {}).pbr or {}
+		local n = variantFor(key .. "#n", swap, fx, fy)
+		local r = variantFor(key .. "#r", swap, fx, fy)
+			or (if consts.r then flatImage(consts.r) elseif opts.matte ~= false then flatImage(255) else nil)
+		local m = variantFor(key .. "#m", swap, fx, fy) or (if consts.m then flatImage(consts.m) else nil)
+		return n, r, m
 	end
 
 	local byBrush: { [number]: { BasePart } } = {}
@@ -276,9 +344,10 @@ function MapImporter.build(contents: string, options: Options?)
 					t.StudsPerTileU, t.StudsPerTileV = su, sv
 					t.OffsetStudsU, t.OffsetStudsV = ou, ov
 					t.ColorMapContent = Content.fromObject(img)
-					if roughness then
-						t.RoughnessMapContent = Content.fromObject(roughness)
-					end
+					local nImg, rImg, mImg = pbrFor(imgKey or mat, mat, swap, fx, fy)
+					if nImg then t.NormalMapContent = Content.fromObject(nImg) end
+					if rImg then t.RoughnessMapContent = Content.fromObject(rImg) end
+					if mImg then t.MetalnessMapContent = Content.fromObject(mImg) end
 					t.Parent = p
 					counts.textures += 1
 					local mm = meta.materials[mat]
@@ -367,6 +436,9 @@ function MapImporter.build(contents: string, options: Options?)
 	local refreshed = MapImporter.refreshImages(root)
 	progress(string.format("done: %d parts, %d textures (%d images), %d lights, %d placeholders",
 		counts.parts, counts.textures, refreshed, counts.lights, counts.placeholders))
+	if imageFailures > 0 then
+		warn(string.format("[MapImporter] %d images couldn't be created (EditableImage memory budget?); those maps are missing", imageFailures))
+	end
 	return root, counts
 end
 

@@ -44,11 +44,39 @@ The `.dds` paths don't exist as files. They are inside `mod_00.pkg` … `mod_12.
 
 Decoding a 2048² BC7 albedo at mip 2 (512²) is a few hundred KB of GDeflate and works.
 
+## The pipeline
+
+1. `python -m vmf2rbx rtx-list --vmf MAP.vmf --game portal --usda portal_rtx_replacements.usda -o MAP.rtxlist`
+   lists the replacement textures the map's materials need (with the material -> hash pairs
+   as comments).
+2. On the PC with Portal with RTX: `py tools/rtx_extract.py MAP.rtxlist` (plain Python, no
+   packages). It copies one mip of each listed texture (the largest no bigger than 512 px)
+   out of the `.pkg` files, still compressed, into `MAP.rtxb`.
+3. `python -m vmf2rbx build ... --rtx-usda portal_rtx_replacements.usda --rtxb MAP.rtxb`
+   inflates (GDeflate, via `tools/native/gdeflate`) and decodes (BCn, via Pillow) them, and
+   for each covered material uses:
+   * the RTX albedo instead of the original texture. Tiling still comes from the original
+     VTF's size: a replacement keeps the original's UVs.
+   * the normal map, converted to (image right, image down) components
+   * roughness and metalness as single-channel maps (256 px), or a constant when flat
+4. The importer orients the normal map with the colour image (a transpose swaps the
+   components, a flip negates one) and writes it the way Roblox reads normal maps, measured in
+   Studio: R = image right, G = image **up**, B = out of the surface. Faces that need a baked
+   image get baked normal/roughness/metalness maps too, with the normals turned by the face's
+   texture angle.
+
+## Normal maps
+
+Remix's tangent frame is x = +u, y = +v (`genTangSpace` in `math.slangh`, from PBRT), and v
+runs down the image, so its normals are "DirectX-handed". Encoding (`inputs:encoding` in the
+material): 0 = octahedral (the usual `_OTH` maps, two channels, decoded with
+`signedOctahedralToHemisphereDirection`: t = ((x + y) / 2, (x - y) / 2), z = 1 - |t.x| - |t.y|),
+1 = tangent space OpenGL, 2 = tangent space DirectX.
+
 ## What's still open
 
-* Most packages are larger than what can be copied to a cloud session, so the extraction has
-  to run on the PC with the game installed. That needs a GDeflate decoder that runs there
-  (a pure-Python one, or a small prebuilt library).
-* The Roblox side: `Texture` has `NormalMapContent`, `RoughnessMapContent`,
-  `MetalnessMapContent` and an emissive mask. Remix normals are often octahedral and
-  OpenGL-handed (`_OTH`), so they need converting to Roblox's tangent-space convention.
+* The build's GDeflate step needs the native library (`tools/native/gdeflate/build.sh`); to run
+  the whole build on Windows it needs building there too (or a pure-Python decoder).
+* Emissive masks aren't used yet; texture lights are Neon parts.
+* EditableImages share a memory budget. With PBR maps a map uses roughly three times the
+  images; the importer skips any image it can't create and says how many.

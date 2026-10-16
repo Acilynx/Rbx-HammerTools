@@ -17,6 +17,8 @@ def main(argv=None) -> int:
     b.add_argument("--region", nargs=6, type=float, metavar=("MINX", "MINY", "MINZ", "MAXX", "MAXY", "MAXZ"),
                    help="only brushes touching this box (Source units)")
     b.add_argument("--no-verify", action="store_true", help="skip the per-brush decomposition self-check")
+    b.add_argument("--rtx-usda", help="Portal RTX's portal_rtx_replacements.usda (with --rtxb: PBR maps)")
+    b.add_argument("--rtxb", help="textures pulled by tools/rtx_extract.py")
     b.add_argument("-o", "--out", required=True)
     b.add_argument("--report", help="also write the build report as JSON")
     r = sub.add_parser("rtx-list", help="list the Portal RTX textures a map needs (input for tools/rtx_extract.py)")
@@ -42,7 +44,8 @@ def main(argv=None) -> int:
     bsp = open(a.bsp, "rb").read() if a.bsp else None
     region = (a.region[:3], a.region[3:]) if a.region else None
     res = build(vmf, fsys, bsp, BuildOptions(region=region, textures=fsys is not None,
-                                             lights=bsp is not None, verify=not a.no_verify))
+                                             lights=bsp is not None, verify=not a.no_verify,
+                                             rtx_usda=a.rtx_usda, rtxb=a.rtxb))
     import os
     res.meta["map"] = os.path.splitext(os.path.basename(a.vmf))[0].removesuffix("_d")
     size = write_package(a.out, res.meta, res.images)

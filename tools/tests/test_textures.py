@@ -189,3 +189,56 @@ def test_texture_part_bakes_instead_of_skipping():
         faces += f
         assert not skipped
     assert len(baked) == 2 and sum(1 for f in faces if f.image) == 2
+
+
+def orient_normals_reference(arr, swap, fx, fy):
+    """What the importer does to a normal map for a face's image orientation (MapImporter
+    orientNormal): pixels move like the colour image (transpose, then flips), and the (right,
+    down) components follow: swapped by a transpose, negated by a flip on that axis."""
+    n = arr.astype(float) / 255 * 2 - 1
+    if swap:
+        n = n.transpose(1, 0, 2)[..., ::-1]
+    if fx:
+        n = n[:, ::-1] * [-1, 1]
+    if fy:
+        n = n[::-1] * [1, -1]
+    return n
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_baked_normals_agree_with_importer_orientation(seed):
+    """On faces Roblox can tile, the importer orients the normal map itself. Baking the same face
+    must give the same normals; that ties the importer's component swaps/flips to the bake's
+    d(s,t)/d(u,v) transform, so neither can drift."""
+    from vmf2rbx.textures import FaceBake
+    rng = np.random.default_rng(seed)
+    W = H = 64
+    # a normal map whose direction varies smoothly across the image
+    yy, xx = np.mgrid[0:H, 0:W]
+    ang = 2 * np.pi * (xx / W + 2 * yy / H)
+    src = np.stack([0.6 * np.cos(ang), 0.6 * np.sin(ang)], -1)
+    enc = np.round((src + 1) / 2 * 255).astype(np.uint8)
+    compared = 0
+    for brush in all_test_brushes(rng)[:4]:
+        for part in brush_to_parts(brush):
+            for face in FACE_NORMALS:
+                side = find_side(brush, part, face)
+                if side is None:
+                    continue
+                ft = map_face(part, face, side, W, H)
+                fb = FaceBake(part, face, side, (W, H))
+                baked = fb.sample_normal(enc).astype(float) / 255 * 2 - 1
+                oriented = orient_normals_reference(enc, ft.swap, ft.flip_x, ft.flip_y)
+                # where does each baked pixel land in the oriented image? use the tiling params
+                Nx, Ny = oriented.shape[1], oriented.shape[0]
+                ys, xs = np.mgrid[0:fb.ny, 0:fb.nx]
+                u = (xs + 0.5) / fb.nx * fb.tex.studs_per_tile_u
+                v = (ys + 0.5) / fb.ny * fb.tex.studs_per_tile_v
+                px = np.floor(((u + ft.offset_u) / ft.studs_per_tile_u * Nx) % Nx).astype(int)
+                py = np.floor(((v + ft.offset_v) / ft.studs_per_tile_v * Ny) % Ny).astype(int)
+                want = oriented[py, px]
+                # ignore pixels sitting on a texel boundary (nearest-texel picks can differ)
+                err = np.linalg.norm(baked - want, axis=-1)
+                assert np.median(err) < 0.02, f"brush {brush.id} {face}: median normal error {np.median(err):.3f}"
+                compared += 1
+    assert compared > 20

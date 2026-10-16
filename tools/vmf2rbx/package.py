@@ -1,8 +1,14 @@
 """Map package (.htmp): everything the Studio importer needs, in one file.
 
 Layout:  b"HTMP" | u32 json_length | json (utf-8) | blob
-Images are stored palettized (<=256 colours): palette (ncol * RGBA) followed by one index byte
-per pixel, at blob offset `off`. The importer builds the per-face orientation variants itself.
+
+Images (meta["images"], each at blob offset `off`, `len` bytes):
+* colour (a PIL image): enc "pal", palettized to <=256 colours: palette (ncol * RGBA), then one
+  index byte per pixel
+* data maps (a uint8 numpy array, H x W x ch): enc "zstd", the raw bytes zstd-compressed
+  (Roblox's EncodingService decompresses them). ch 1 = roughness/metalness, ch 2 = normal map
+  (right, down) components. Palettizing would band normal maps badly.
+The importer builds the per-face orientation variants itself.
 """
 from __future__ import annotations
 
@@ -12,7 +18,7 @@ import struct
 from PIL import Image
 
 MAGIC = b"HTMP"
-VERSION = 1
+VERSION = 2
 
 
 def palettize(img: Image.Image) -> tuple[bytes, int]:
@@ -25,9 +31,20 @@ def palettize(img: Image.Image) -> tuple[bytes, int]:
 def write_package(path: str, meta: dict, images: dict[str, Image.Image]) -> int:
     blob = bytearray()
     mats = []
+    zc = None
     for name, img in images.items():
-        data, ncol = palettize(img)
-        mats.append(dict(name=name, w=img.width, h=img.height, ncol=ncol, off=len(blob)))
+        if isinstance(img, Image.Image):
+            data, ncol = palettize(img)
+            mats.append(dict(name=name, enc="pal", w=img.width, h=img.height, ncol=ncol, off=len(blob), len=len(data)))
+        else:
+            import numpy as np
+            import zstandard
+            zc = zc or zstandard.ZstdCompressor(level=19)
+            a = np.ascontiguousarray(img, dtype=np.uint8)
+            if a.ndim == 2:
+                a = a[..., None]
+            data = zc.compress(a.tobytes())
+            mats.append(dict(name=name, enc="zstd", w=a.shape[1], h=a.shape[0], ch=a.shape[2], off=len(blob), len=len(data)))
         blob += data
     meta = dict(meta, version=VERSION, images=mats)
     js = json.dumps(meta, separators=(",", ":")).encode()

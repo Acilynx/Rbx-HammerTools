@@ -59,6 +59,9 @@ def parse_replacements(usda_text: str) -> dict[str, dict[str, str]]:
         block = usda_text[pos:end]
         tex = {ch: path for ch, path in re.findall(r"asset inputs:(\w+)_texture = @\./([^@]+)@", block)
                if ch in CHANNELS}
+        enc = re.search(r"int inputs:encoding = (\d)", block)
+        if tex and enc:
+            tex["encoding"] = int(enc.group(1))
         out[h] = tex
     return out
 
@@ -165,6 +168,43 @@ def read_rtxb(path: str) -> dict[str, RtxTexture]:
     entries = json.loads(b[8:8 + n])
     blob0 = 8 + n
     return {e["name"]: decode(e, b[blob0 + e["offset"]: blob0 + e["offset"] + e["size"]]) for e in entries}
+
+
+# Remix normal map encodings (AperturePBR_Normal.mdl "encoding")
+OCTAHEDRAL, TANGENT_OGL, TANGENT_DX = 0, 1, 2
+
+
+def normal_components(img: Image.Image, encoding: int = OCTAHEDRAL) -> np.ndarray:
+    """Remix normal map -> (H, W, 2) float tangential components (image right, image down).
+
+    Remix's tangent frame is x = +u, y = +v, and v runs down the image. Octahedral maps use
+    Remix's hemisphere encoding (packing.slangh signedOctahedralToHemisphereDirection)."""
+    a = np.asarray(img.convert("RGBA"), float)[..., :3] / 255 * 2 - 1
+    if encoding == OCTAHEDRAL:
+        tx, ty = (a[..., 0] + a[..., 1]) / 2, (a[..., 0] - a[..., 1]) / 2
+        v = np.stack([tx, ty, 1 - np.abs(tx) - np.abs(ty)], -1)
+    elif encoding == TANGENT_OGL:
+        v = a * [1, -1, 1]
+    else:
+        v = a
+    v /= np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-9)
+    return v[..., :2]
+
+
+def encode_components(n: np.ndarray) -> np.ndarray:
+    return np.round((np.clip(n, -1, 1) + 1) / 2 * 255).astype(np.uint8)
+
+
+def gray_map(img: Image.Image, max_size: int = 256, flat_range: int = 6):
+    """Single-channel map (red) as uint8, downsized to max_size; an int when it's flat."""
+    a = np.asarray(img.convert("RGBA"))[..., 0]
+    if int(a.max()) - int(a.min()) < flat_range:
+        return int(round(float(a.mean())))
+    im = Image.fromarray(a, "L")
+    if max(im.size) > max_size:
+        k = max_size / max(im.size)
+        im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.Resampling.BOX)
+    return np.asarray(im)
 
 
 def norm(name: str) -> str:
