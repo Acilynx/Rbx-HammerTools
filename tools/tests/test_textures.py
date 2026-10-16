@@ -12,11 +12,13 @@ Per face: U axis, V axis (part-local), and the origin corner as signs of the hal
 import numpy as np
 import pytest
 
-from helpers import box, chamfered_box, diagonal_strip, ngon_prism, right_wedge, rotated_box
+SPU_T = 0.078125
+
+from helpers import world_aligned_axes, box, chamfered_box, diagonal_strip, ngon_prism, right_wedge, rotated_box
 from vmf2rbx.brushes import TexAxis
 from vmf2rbx.coords import point_to_source
 from vmf2rbx.geometry import brush_to_parts
-from vmf2rbx.textures import FACE_NORMALS, face_frame, find_side, map_face
+from vmf2rbx.textures import FACE_NORMALS, bake_face, face_frame, find_side, map_face, texture_part
 
 ROBLOX_FACES = {
     #          U            V            origin corner (sign of hx, hy, hz)
@@ -125,3 +127,65 @@ def test_roblox_draws_the_same_texel_as_hammer(seed):
                         f"brush {brush.id} piece {part.piece} {face}: texel ({rs:.2f},{rt:.2f}) vs Hammer ({s % W:.2f},{t % H:.2f})"
                     checked += 1
     assert checked > 500
+
+
+def coord_image(W, H):
+    """Each pixel stores its own (x, y): R = x, G = y."""
+    from PIL import Image
+    a = np.zeros((H, W, 4), np.uint8)
+    a[..., 0] = np.arange(W)[None, :]
+    a[..., 1] = np.arange(H)[:, None]
+    a[..., 3] = 255
+    return Image.fromarray(a, "RGBA")
+
+
+@pytest.mark.parametrize("yaw", [21.8, 33.0, 70.0])
+def test_baked_face_shows_hammer_texels(yaw):
+    """A box yawed in the wall plane with world-aligned texture axes (the doorway case): the caps
+    can't be tiled, so they're baked. The baked image, laid once over the face, must show the
+    texel Hammer draws at every point (within one output pixel)."""
+    W, H = 64, 32
+    img = coord_image(W, H)
+    brush = rotated_box(1, [10, 20, 30], [96, 32, 64], yaw, axes=world_aligned_axes, scale=0.25, offsets=(7.0, 3.0))
+    checked = baked_faces = 0
+    rng = np.random.default_rng(1)
+    for part in brush_to_parts(brush):
+        for face in FACE_NORMALS:
+            side = find_side(brush, part, face)
+            if side is None or map_face(part, face, side, W, H) is not None:
+                continue
+            ft, out = bake_face(part, face, side, img, "k")
+            baked_faces += 1
+            assert ft.image == "k" and not (ft.swap or ft.flip_x or ft.flip_y)
+            assert ft.offset_u == 0 and ft.offset_v == 0
+            px = np.asarray(out)
+            ny, nx = px.shape[:2]
+            O, Ut, Vt = oracle_frame(part.cls, part.size, face)
+            hs = part.size / 2
+            lu, lv = np.abs(Ut) @ hs * 2, np.abs(Vt) @ hs * 2
+            assert abs(ft.studs_per_tile_u - lu) < 1e-9 and abs(ft.studs_per_tile_v - lv) < 1e-9
+            # one output pixel spans at most this many source texels
+            tol = 1.0 + max(lu / nx, lv / ny) / (SPU_T * 0.25)
+            for _ in range(200):
+                u, v = rng.uniform(0, lu), rng.uniform(0, lv)
+                pw = part.center + part.rot.T @ (O + u * Ut + v * Vt)
+                s, t = hammer_texel(side, point_to_source(pw))
+                r, g = px[min(ny - 1, int(v / lv * ny)), min(nx - 1, int(u / lu * nx))][:2]
+                ds, dt = (r - np.floor(s)) % W, (g - np.floor(t)) % H
+                assert min(ds, W - ds) <= tol and min(dt, H - dt) <= tol, f"{face} at ({u:.2f},{v:.2f})"
+                checked += 1
+    assert baked_faces == 2      # the two caps; the sides stay tileable
+    assert checked == 400
+
+
+def test_texture_part_bakes_instead_of_skipping():
+    W, H = 64, 32
+    brush = rotated_box(1, [0, 0, 0], [96, 32, 64], 21.8, axes=world_aligned_axes)
+    baked = {}
+    faces = []
+    for part in brush_to_parts(brush):
+        f, skipped = texture_part(brush, part, {brush.sides[0].material: (W, H)},
+                                  {brush.sides[0].material: coord_image(W, H)}, baked)
+        faces += f
+        assert not skipped
+    assert len(baked) == 2 and sum(1 for f in faces if f.image) == 2

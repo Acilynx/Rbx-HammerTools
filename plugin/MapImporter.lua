@@ -5,8 +5,8 @@
 -- parts, per-face textures, texture lights, point/spot lights and the spawn point.
 --
 -- Textures are EditableImages in this version ("preview mode"): they live only in the current
--- Studio session, don't survive saving, and are empty during playtests. Publish mode (uploaded
--- image assets) comes later.
+-- Studio session, don't survive saving, and are missing during playtests (the plugin redraws
+-- them in the edit place when a playtest ends). Publish mode (uploaded image assets) comes later.
 
 local AssetService = game:GetService("AssetService")
 local HttpService = game:GetService("HttpService")
@@ -17,6 +17,8 @@ export type Options = {
 	parent: Instance?,          -- default: workspace.Map
 	moveSpawn: boolean?,        -- move/hide the first SpawnLocation onto info_player_start (default true)
 	texlightsAsNeon: boolean?,  -- light-emitting materials become Neon in their light colour (default true)
+	indoorLighting: boolean?,   -- set up Lighting for an enclosed map: no sun or sky light, dim ambient (default true)
+	matte: boolean?,            -- give textures a flat full-roughness map so they don't read as glossy (default true)
 	onProgress: ((string) -> ())?,
 }
 
@@ -99,28 +101,56 @@ local function folderName(rec): string
 	return rec.owner .. (if rec.entity ~= "" then "_" .. rec.entity else "")
 end
 
--- Studio sometimes never draws EditableImages that were created while a long build was
--- yielding. Rebuilding each image once, after the build, makes them draw reliably.
+-- Studio sometimes stops drawing EditableImages: ones created while a long build was
+-- yielding, and all of them after a playtest (the pixels are still there; only the drawing is
+-- lost). Rebuilding each image once makes them draw again. The plugin calls this after the
+-- build and whenever a playtest ends.
+local MAP_PROPS = { "ColorMapContent", "RoughnessMapContent" }
+
 function MapImporter.refreshImages(root: Instance): number
 	local remap = {}
 	local made = 0
 	for _, t in ipairs(root:GetDescendants()) do
 		if t:IsA("Texture") then
-			local old = t.ColorMapContent.Object
-			if old and old:IsA("EditableImage") then
-				if not remap[old] then
-					local sz = old.Size
-					local img = AssetService:CreateEditableImage({ Size = sz })
-					img:WritePixelsBuffer(Vector2.zero, sz, old:ReadPixelsBuffer(Vector2.zero, sz))
-					remap[old] = img
-					made += 1
+			for _, prop in ipairs(MAP_PROPS) do
+				local old = (t :: any)[prop].Object
+				if old and old:IsA("EditableImage") then
+					if not remap[old] then
+						local sz = old.Size
+						local img = AssetService:CreateEditableImage({ Size = sz })
+						img:WritePixelsBuffer(Vector2.zero, sz, old:ReadPixelsBuffer(Vector2.zero, sz))
+						remap[old] = img
+						made += 1
+					end
+					(t :: any)[prop] = Content.fromObject(remap[old])
 				end
-				t.ColorMapContent = Content.fromObject(remap[old])
 			end
 		end
 	end
 	for old in pairs(remap) do old:Destroy() end
 	return made
+end
+
+-- Source maps are lit only by their own lights (plus baked bounce). Roblox's default sun,
+-- outdoor ambient and sky-based environment light reach inside closed rooms and wash
+-- everything out, so for an enclosed map they are turned off and a dim ambient stands in for
+-- bounce light. (Undo restores the previous values, since this runs inside the import's
+-- change-history recording.) A place that's already set up for indoors (no sun, no outdoor
+-- ambient) is left alone, so your own tuning survives re-imports.
+function MapImporter.setupIndoorLighting()
+	local L = game:GetService("Lighting")
+	if L.Brightness == 0 and L.OutdoorAmbient == Color3.new(0, 0, 0) then
+		return false
+	end
+	L.Brightness = 0
+	L.OutdoorAmbient = Color3.new(0, 0, 0)
+	L.Ambient = Color3.fromRGB(50, 52, 56)
+	L.EnvironmentDiffuseScale = 0
+	L.EnvironmentSpecularScale = 0
+	for _, e in ipairs(L:GetChildren()) do
+		if e:IsA("SunRaysEffect") then e.Enabled = false end
+	end
+	return true
 end
 
 -- ------------------------------------------------------------------ build
@@ -167,6 +197,17 @@ function MapImporter.build(contents: string, options: Options?)
 			variants[key] = orient(bases[mat], im.w, im.h, swap, fx, fy)
 		end
 		return variants[key]
+	end
+
+	-- Matte: Source's lightmapped surfaces have no specular unless the material asks for an
+	-- envmap; a part's default roughness makes every texture look polished. One shared
+	-- 4x4 white roughness map (white = fully rough) fixes that. PBR maps replace it later.
+	local roughness: EditableImage? = nil
+	if opts.matte ~= false then
+		roughness = AssetService:CreateEditableImage({ Size = Vector2.new(4, 4) })
+		local px = buffer.create(4 * 4 * 4)
+		buffer.fill(px, 0, 255)
+		roughness:WritePixelsBuffer(Vector2.zero, Vector2.new(4, 4), px)
 	end
 
 	local byBrush: { [number]: { BasePart } } = {}
@@ -217,8 +258,9 @@ function MapImporter.build(contents: string, options: Options?)
 				p.Name = "brush_" .. rec.id
 			end
 			for _, f in ipairs(rec.faces) do
-				local face, mat, swap, fx, fy, su, sv, ou, ov = table.unpack(f)
-				local img = variantFor(mat, swap, fx, fy)
+				-- f[10], when present, names a baked image (a face at an angle Roblox tiling can't do)
+				local face, mat, swap, fx, fy, su, sv, ou, ov, imgKey = table.unpack(f)
+				local img = variantFor(imgKey or mat, swap, fx, fy)
 				if img then
 					local t = Instance.new("Texture")
 					t.Name = "SrcTex_" .. face
@@ -226,6 +268,9 @@ function MapImporter.build(contents: string, options: Options?)
 					t.StudsPerTileU, t.StudsPerTileV = su, sv
 					t.OffsetStudsU, t.OffsetStudsV = ou, ov
 					t.ColorMapContent = Content.fromObject(img)
+					if roughness then
+						t.RoughnessMapContent = Content.fromObject(roughness)
+					end
 					t.Parent = p
 					counts.textures += 1
 					local mm = meta.materials[mat]
@@ -293,6 +338,10 @@ function MapImporter.build(contents: string, options: Options?)
 	end
 
 	root.Parent = parent
+
+	if opts.indoorLighting ~= false then
+		MapImporter.setupIndoorLighting()
+	end
 
 	if meta.spawn and opts.moveSpawn ~= false then
 		local spawn = workspace:FindFirstChildOfClass("SpawnLocation")

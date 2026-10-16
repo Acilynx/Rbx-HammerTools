@@ -37,6 +37,7 @@ class FaceTex:
     studs_per_tile_v: float
     offset_u: float
     offset_v: float
+    image: str | None = None   # image key when it isn't the material's own image (baked faces)
 
 
 def face_frame(cls: str, size, face: str):
@@ -106,8 +107,50 @@ def map_face(part: PartSpec, face: str, side: Side, tex_w: int, tex_h: int):
     return FaceTex(face, side.material, bool(swap), bool(fx), bool(fy), spt_u, spt_v, off_u, off_v)
 
 
-def texture_part(brush: Brush, part: PartSpec, sizes: dict[str, tuple[int, int]]):
-    """FaceTex for every visible, mappable face of a part. Returns (faces, skipped_reasons)."""
+BAKE_MAX_PX = 512      # longest side of a baked face image
+BAKE_MIN_PX = 8
+
+
+def bake_face(part: PartSpec, face: str, side: Side, image, key: str):
+    """Fallback for faces whose texture runs at an angle Roblox's tiling can't express.
+
+    Renders Hammer's mapping of `image` onto exactly this face into a new image that covers the
+    face once (StudsPerTile = face size, offset 0). Works for any angle, at the cost of one
+    image per face. Returns (FaceTex, PIL image)."""
+    from PIL import Image
+    O, Ut, Vt, _ = face_frame(part.cls, part.size, face)
+    h = np.asarray(part.size, float) / 2
+    if part.cls == "WedgePart" and face == "Front":
+        W, H = 2 * h[0], 2 * h[1]                      # V is measured as height on the slope
+    else:
+        W, H = 2 * (h @ np.abs(Ut)), 2 * (h @ np.abs(Vt))
+    Rm = part.rot.T
+    Ow, Uw, Vw = part.center + Rm @ O, Rm @ Ut, Rm @ Vt
+    gs = to_roblox(side.u.vec) / (SPU * side.u.scale)
+    gt = to_roblox(side.v.vec) / (SPU * side.v.scale)
+    s0, sU, sV = Ow @ gs + side.u.offset, Uw @ gs, Vw @ gs
+    t0, tU, tV = Ow @ gt + side.v.offset, Uw @ gt, Vw @ gt
+    # keep the source's texel density along each face axis, within limits
+    dens_u, dens_v = np.hypot(sU, tU), np.hypot(sV, tV)
+    nx, ny = max(BAKE_MIN_PX, int(np.ceil(W * dens_u))), max(BAKE_MIN_PX, int(np.ceil(H * dens_v)))
+    scale = min(1.0, BAKE_MAX_PX / max(nx, ny))
+    nx, ny = max(1, int(round(nx * scale))), max(1, int(round(ny * scale)))
+    src = np.asarray(image.convert("RGBA"))
+    th, tw = src.shape[:2]
+    u = (np.arange(nx) + 0.5) / nx * W
+    v = (np.arange(ny) + 0.5) / ny * H
+    uu, vv = np.meshgrid(u, v)
+    sx = np.floor(s0 + sU * uu + sV * vv).astype(np.int64) % tw
+    ty = np.floor(t0 + tU * uu + tV * vv).astype(np.int64) % th
+    out = Image.fromarray(src[ty, sx], "RGBA")
+    return FaceTex(face, side.material, False, False, False, float(W), float(H), 0.0, 0.0, image=key), out
+
+
+def texture_part(brush: Brush, part: PartSpec, sizes: dict[str, tuple[int, int]], images=None, baked=None):
+    """FaceTex for every visible face of a part. Returns (faces, skipped_reasons).
+
+    With `images` (material -> PIL image) and `baked` (a dict to collect new images in), faces
+    whose mapping isn't a multiple of 90 degrees get a baked image instead of being skipped."""
     faces, skipped = [], []
     if part.cls == "Placeholder":
         return faces, skipped
@@ -121,10 +164,14 @@ def texture_part(brush: Brush, part: PartSpec, sizes: dict[str, tuple[int, int]]
             skipped.append(("no texture", side.material))
             continue
         ft = map_face(part, face, side, *sizes[side.material])
-        if ft is None:
+        if ft is None and images is not None and baked is not None and side.material in images:
             # On a decomposed brush this is almost always a cap whose texture runs at an angle
             # to every geometrically valid slicing direction (thin diagonal strips, slanted
-            # triangles). Candidates for later: 45-degree pre-rotated images, mesh fallback.
+            # triangles, rotated slabs in a doorway).
+            key = f"bake:{brush.id}:{part.piece}:{face}"
+            ft, baked[key] = bake_face(part, face, side, images[side.material], key)
+            faces.append(ft)
+        elif ft is None:
             skipped.append(("texture not at 90 degrees to part" + (" (decomposed piece)" if part.piece else ""), side.material))
         else:
             faces.append(ft)

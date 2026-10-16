@@ -20,6 +20,7 @@ class BuildOptions:
     lights: bool = True
     verify: bool = True                # volume + point test every decomposed brush
     texlights_as_neon: bool = True     # texture-light faces: Neon + light colour instead of an image
+    bake_faces: bool = True            # faces at odd texture angles get their own baked image
 
 
 @dataclass
@@ -36,7 +37,8 @@ def _part_record(b: Brush, p: PartSpec, faces) -> dict:
                 r=[round(float(x), 6) for x in p.rot.flatten()],
                 faces=[[f.face, f.material, f.swap, f.flip_x, f.flip_y,
                         round(f.studs_per_tile_u, 6), round(f.studs_per_tile_v, 6),
-                        round(f.offset_u, 6), round(f.offset_v, 6)] for f in faces])
+                        round(f.offset_u, 6), round(f.offset_v, 6)] + ([f.image] if f.image else [])
+                       for f in faces])
 
 
 VOLUME_WARN = 1e-3   # relative; decompiled VMFs carry float noise (planes ~0.03 deg off parallel)
@@ -122,19 +124,22 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
 
     # --- textures per face
     parts_out = []
+    baked = {}
     for b, parts in built:
         for p in parts:
             faces = []
             if sizes:
-                faces, skipped = texture_part(b, p, sizes)
+                faces, skipped = texture_part(b, p, sizes, images, baked if opts.bake_faces else None)
                 if opts.texlights_as_neon:
                     faces = [f for f in faces if f.material not in texlight_mats]
                 for why, m in skipped:
                     rep[f"face skipped: {why}"] += 1
                 rep["textured faces"] += len(faces)
+                rep["baked faces"] += sum(1 for f in faces if f.image)
             parts_out.append(_part_record(b, p, faces))
-    face_mats = {f[1] for pr in parts_out for f in pr["faces"]}
-    images = {m: img for m, img in images.items() if m in face_mats}
+    face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]}
+    images = {m: img for m, img in images.items() if m in face_imgs}
+    images.update({k: img for k, img in baked.items() if k in face_imgs})
 
     spawn = None
     for e in vmf.entities:

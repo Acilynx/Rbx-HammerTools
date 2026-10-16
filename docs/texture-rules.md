@@ -33,9 +33,25 @@ Hammer side of the mapping: texel `s = (P · uaxis) / uscale + uoffset` with `P`
 (u, v) in studs; the mapping is representable exactly when s depends only on u and t only on v
 (or both swapped).
 
+## Faces the tiling can't express: baked images
+
+When s depends on both u and v (the texture runs at some angle to the part's edges), no
+choice of image orientation, tile size and offset reproduces it. This happens on decomposed
+brushes whose slicing direction is forced by the geometry, e.g. the doorway arches in
+testchmb_a_00: their slabs are rotated ~22° in the wall plane while the cap texture stays
+world-aligned.
+
+For those faces the translator renders Hammer's mapping onto exactly that face into a new
+image (`bake_face`): `StudsPerTile` = the face size, offset 0, original orientation. Each
+output pixel takes the source texel Hammer would draw at its centre, at roughly the source's
+texel density (longest side capped at 512 px). Cost: one image per such face, so it's a
+fallback, not the default.
+
 ## Verification
 
 `tests/test_textures.py` checks the code against this table written out literally (not
 computed), and checks that the texel Roblox would draw equals Hammer's texel on random 90°
 alignments over boxes, rotated boxes and decomposed prisms. Reintroducing the original
-precedence bug (`n*h@|n|`) makes 30 of those tests fail.
+precedence bug (`n*h@|n|`) makes 30 of those tests fail. Baked faces are checked the same way
+with an image whose pixels encode their own coordinates; mirroring the bake makes those tests
+fail.

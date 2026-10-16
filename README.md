@@ -18,10 +18,12 @@ Scale throughout: **128 Hammer units = 10 studs** (`1 unit = 0.078125 studs`).
 2. **Textures.** Every visible face gets a `Texture` whose tiling and offset reproduce Hammer's
    texture alignment exactly. Each face uses one of eight orientations of its image
    (rotation/mirroring is baked into the image, because `Texture.Rotation` and `UVScale`
-   can't do it correctly).
+   can't do it correctly). Faces whose texture runs at an angle the tiling can't express get
+   their own baked image instead (see `docs/texture-rules.md`).
 3. **Lights.** Texture lights are read back from the compiled BSP (VRAD bakes them in as
    `emit_surface` world lights) and become `SurfaceLight`s; point/spot lights use VRAD's own
-   intensity and falloff.
+   intensity and falloff. The importer sets up indoor lighting (no sun/sky light, dim
+   ambient) and gives textures a flat roughness map so surfaces are matte.
 
 Coordinates: Source is Z-up, Roblox is Y-up. The mapping is `(x, y, z) → (x, z, −y)`.
 Swapping Y and Z alone would mirror the map.

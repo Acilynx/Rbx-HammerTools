@@ -9,7 +9,9 @@ lights are read from the same lump, using VRAD's own intensity and attenuation i
 The lump's texinfo field is not reliable for surfaces (it's 0 in Portal's maps), so each patch
 is matched back to a brush face by position and normal.
 
-Brightness/range conversion uses tunable constants; they are a starting point, not derived.
+Brightness/range conversion uses tunable constants. They are not derived: they were set by eye
+in Studio on testchmb_a_00 with the importer's indoor lighting (no sun or sky light, dim
+ambient), aiming for Portal's overall level of light rather than its exact numbers.
 """
 from __future__ import annotations
 
@@ -31,9 +33,16 @@ EMIT = ["surface", "point", "spot", "skylight", "quakelight", "skyambient"]
 @dataclass
 class LightTuning:
     cutoff: float = 0.05                 # illuminance treated as "faded out" (lightmap units)
-    surface_brightness_per_radiance: float = 0.3
-    point_brightness_divisor: float = 2500.0
-    max_range: float = 60.0              # Roblox light range cap (studs)
+    surface_brightness_per_radiance: float = 0.03
+    point_brightness_divisor: float = 25000.0
+    max_range: float = 120.0             # Roblox's Range limit (was 60 until 2026)
+    reach_margin: float = 1.25           # a light may reach this far past the first wall it faces
+    saturation: float = 0.5              # 1 = VRAD's colour as is; Source's tonemapping washes it out
+
+
+def _tint(rgb, saturation: float) -> list[int]:
+    """0..1 colour -> 0..255, pulled toward white by (1 - saturation)."""
+    return [round(255 * (1 - saturation + saturation * float(c))) for c in rgb]
 
 
 @dataclass
@@ -101,6 +110,51 @@ def _area(fv, n):
     return 0.5 * abs(sum(P[i, 0] * P[(i + 1) % len(P), 1] - P[(i + 1) % len(P), 0] * P[i, 1] for i in range(len(P))))
 
 
+def solid_planes(brushes: list[Brush]) -> list[tuple[np.ndarray, np.ndarray]]:
+    """(normals, dists) per brush that blocks light: world and func_detail, not tool-only."""
+    out = []
+    for b in brushes:
+        if b.owner in ("world", "func_detail") and not b.is_tool_only:
+            out.append((np.array([sd.normal for sd in b.sides]), np.array([sd.dist for sd in b.sides])))
+    return out
+
+
+def ray_reach(origin, direction, solids, start=0.5, far=1e5) -> float:
+    """Distance (Source units) from origin along direction to the first solid brush, ignoring
+    the first `start` units (so a light on a brush face doesn't hit its own brush)."""
+    o, d = np.asarray(origin, float), np.asarray(direction, float)
+    d = d / np.linalg.norm(d)
+    best = far
+    for N, D in solids:
+        nd, no = N @ d, N @ o
+        par = np.abs(nd) < 1e-9
+        if np.any(par & (no > D + 1e-6)):
+            continue                           # parallel to a plane and outside it
+        t = (D[~par] - no[~par]) / nd[~par]
+        ent, ext = t[nd[~par] < 0], t[nd[~par] > 0]
+        t0 = ent.max() if len(ent) else -np.inf
+        t1 = ext.min() if len(ext) else np.inf
+        if t0 <= t1 and t1 > start:
+            hit = max(t0, start)
+            if hit < best:
+                best = hit
+    return best
+
+
+AXES = np.vstack([np.eye(3), -np.eye(3)])
+
+
+def cone_dirs(axis, half_angle, ring=8) -> list[np.ndarray]:
+    """The axis plus a ring of directions at 70% of the cone's half-angle: one ray down the
+    middle of a spot is easily stopped by a window sill or rail the cone mostly clears."""
+    a = np.asarray(axis, float); a /= np.linalg.norm(a)
+    t1 = np.cross(a, [0.0, 0.0, 1.0] if abs(a[2]) < 0.9 else [1.0, 0.0, 0.0]); t1 /= np.linalg.norm(t1)
+    t2 = np.cross(a, t1)
+    th = 0.7 * half_angle
+    return [a] + [math.cos(th) * a + math.sin(th) * (math.cos(k) * t1 + math.sin(k) * t2)
+                  for k in np.linspace(0, 2 * math.pi, ring, endpoint=False)]
+
+
 @dataclass
 class LightReport:
     texlights: dict = field(default_factory=dict)       # material -> {color, radiance}
@@ -113,6 +167,14 @@ def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=Li
                  keep_brush=lambda b: True, keep_point=lambda p: True) -> LightReport:
     rep = LightReport()
     polys = _face_polys(brushes)
+    solids = solid_planes(brushes)
+
+    def reach_cap(origin, dirs) -> float:
+        """Range limit: just past the farthest of the first walls hit along `dirs`. The cutoff
+        formula alone lets strong lights run far past the room they're in (or, capped at the
+        old 60-stud limit, stop short of the far wall)."""
+        r = max(ray_reach(origin, d, solids) for d in dirs)
+        return min(tuning.max_range, r * SPU * tuning.reach_margin)
     hits = defaultdict(list)
     for wl in world_lights:
         if wl.type != "surface":
@@ -137,14 +199,15 @@ def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=Li
         by_mat[s.material][1] += _area(fv, s.normal)
     for m, (I, A) in by_mat.items():
         rad = I / A
-        rep.texlights[m] = dict(radiance=rad.tolist(), color=(rad / rad.max()).tolist())
+        rep.texlights[m] = dict(radiance=rad.tolist(),
+                                color=[c / 255 for c in _tint(rad / rad.max(), tuning.saturation)])
     for idx, ws in hits.items():
         b, s, fv = polys[idx]
         if not keep_brush(b):
             continue
         I = np.sum([w.intensity for w in ws], 0)
         tl = rep.texlights[s.material]
-        rng = min(tuning.max_range, math.sqrt(I.mean() / tuning.cutoff) * SPU)
+        rng = min(reach_cap(fv.mean(0), [s.normal]), math.sqrt(I.mean() / tuning.cutoff) * SPU)
         rep.surface.append(dict(brush=b.id, material=s.material, normal=to_roblox(s.normal).tolist(),
                                 color=[round(255 * c) for c in tl["color"]],
                                 brightness=tuning.surface_brightness_per_radiance * float(np.mean(tl["radiance"])),
@@ -161,8 +224,10 @@ def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=Li
         else:
             d = 1e9
         rec = dict(kind=wl.type, position=(to_roblox(wl.origin) * SPU).tolist(), direction=to_roblox(wl.normal).tolist(),
-                   color=[round(255 * x / wl.intensity.max()) for x in wl.intensity],
-                   brightness=lum / tuning.point_brightness_divisor, range=min(tuning.max_range, max(0.0, d) * SPU),
+                   color=_tint(wl.intensity / wl.intensity.max(), tuning.saturation),
+                   brightness=lum / tuning.point_brightness_divisor,
+                   range=min(reach_cap(wl.origin, cone_dirs(wl.normal, math.acos(max(-1.0, min(1.0, wl.stopdot2))))
+                                       if wl.type == "spot" else AXES), max(0.0, d) * SPU),
                    style=wl.style)
         if wl.type == "spot":
             rec["angle"] = 2 * math.degrees(math.acos(max(-1.0, min(1.0, wl.stopdot2))))
