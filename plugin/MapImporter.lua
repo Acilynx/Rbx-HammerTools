@@ -19,6 +19,7 @@ export type Options = {
 	texlightsAsNeon: boolean?,  -- light-emitting materials become Neon in their light colour (default true)
 	indoorLighting: boolean?,   -- set up Lighting for an enclosed map: no sun or sky light, dim ambient (default true)
 	matte: boolean?,            -- give textures a flat full-roughness map so they don't read as glossy (default true)
+	glassTransparency: number?, -- Transparency of Refract-shader glass such as observation windows (default 0.75)
 	onProgress: ((string) -> ())?,
 }
 
@@ -240,6 +241,13 @@ function MapImporter.build(contents: string, options: Options?)
 			local m = meta.materials[rec.mat]
 			if m and m.texlight and opts.texlightsAsNeon ~= false then
 				p.Material = Enum.Material.Neon
+			end
+			if m and m.glass then
+				-- Refract glass (observation windows): Source draws the room behind it, tinted.
+				-- See-through in the tint colour, and no shadow so lights shine through.
+				p.Color = Color3.fromRGB(m.glass[1], m.glass[2], m.glass[3])
+				p.Transparency = opts.glassTransparency or 0.75
+				p.CastShadow = false
 			end
 			target = folder(folderName(rec))
 			if rec.piece > 0 then

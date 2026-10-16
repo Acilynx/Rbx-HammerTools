@@ -155,7 +155,8 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         materials={m: dict(alpha=mats[m].keeps_alpha if m in mats else False,
                            selfillum=mats[m].self_illum if m in mats else False,
                            color=avg_colors.get(m),          # fallback for faces left untextured
-                           texlight=light_rep.texlights.get(m) if light_rep else None)
+                           texlight=light_rep.texlights.get(m) if light_rep else None,
+                           glass=mats[m].refract_tint if m in mats else None)   # Refract glass: tint
                    for m in used},
         lights=dict(surface=light_rep.surface, points=light_rep.points) if light_rep else dict(surface=[], points=[]),
     )

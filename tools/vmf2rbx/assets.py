@@ -6,6 +6,8 @@ mounts HL2) resolve too.
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from io import BytesIO
 
@@ -96,6 +98,19 @@ class MaterialInfo:
     @property
     def self_illum(self) -> bool:
         return self.params.get("$selfillum") == "1"
+
+    @property
+    def refract_tint(self) -> list[int] | None:
+        """For Refract-shader glass (no base texture; Source draws the scene behind it, tinted
+        and distorted): the tint as 0-255 RGB. None for any other shader."""
+        if self.shader.lower() != "refract":
+            return None
+        nums = [float(x) for x in re.findall(r"[-\d.]+", self.params.get("$refracttint", "1 1 1"))[:3]]
+        if len(nums) < 3:
+            return [255, 255, 255]
+        if "{" in self.params.get("$refracttint", ""):      # {r g b} is 0-255, [r g b] is 0-1
+            return [int(round(min(255, max(0, c)))) for c in nums]
+        return [int(round(255 * min(1, max(0, c)))) for c in nums]
 
 
 def resolve_material(fsys, name: str, _depth=0) -> MaterialInfo:

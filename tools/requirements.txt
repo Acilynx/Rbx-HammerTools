@@ -1,4 +1,5 @@
 srctools>=2.4
 numpy>=1.24
 pillow>=10
+xxhash
 pytest>=7

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -18,7 +19,14 @@ def main(argv=None) -> int:
     b.add_argument("--no-verify", action="store_true", help="skip the per-brush decomposition self-check")
     b.add_argument("-o", "--out", required=True)
     b.add_argument("--report", help="also write the build report as JSON")
+    r = sub.add_parser("rtx-list", help="list the Portal RTX textures a map needs (input for tools/rtx_extract.py)")
+    r.add_argument("--vmf", required=True)
+    r.add_argument("--game", required=True, help="game folder containing gameinfo.txt")
+    r.add_argument("--usda", required=True, help="Portal RTX's rtx-remix/mods/gameReadyAssets/portal_rtx_replacements.usda")
+    r.add_argument("-o", "--out", required=True)
     a = ap.parse_args(argv)
+    if a.cmd == "rtx-list":
+        return rtx_list(a)
 
     from srctools import Keyvalues
     from srctools.vmf import VMF
@@ -44,6 +52,28 @@ def main(argv=None) -> int:
         with open(a.report, "w") as fh:
             json.dump(res.report, fh, indent=1, default=str)
     return 1 if res.report["problems"] else 0
+
+
+def rtx_list(a) -> int:
+    from srctools import Keyvalues
+    from srctools.vmf import VMF
+    from .assets import open_game
+    from .brushes import load_vmf_brushes
+    from .rtx import CHANNELS, match_materials, parse_replacements
+    with open(a.vmf, encoding="utf-8", errors="replace") as fh:
+        vmf = VMF.parse(Keyvalues.parse(fh))
+    used = sorted({s.material for b in load_vmf_brushes(vmf) for s in b.visible_sides})
+    with open(a.usda, encoding="utf-8", errors="replace") as fh:
+        reps = parse_replacements(fh.read())
+    matched = match_materials(open_game(a.game), used, reps)
+    names = sorted({m[ch] for m in matched.values() for ch in CHANNELS if ch in m})
+    with open(a.out, "w", encoding="utf-8") as fh:
+        fh.write(f"# Portal RTX textures for {os.path.basename(a.vmf)}: {len(matched)} of {len(used)} materials\n")
+        for m in sorted(matched):
+            fh.write(f"# {m} -> mat_{matched[m]['hash']}\n")
+        fh.write("\n".join(names) + "\n")
+    print(f"{len(matched)} of {len(used)} materials have RTX replacements; {len(names)} textures -> {a.out}")
+    return 0
 
 
 if __name__ == "__main__":
