@@ -54,6 +54,6 @@ def test_round_pillar():
     assert 1 < len(parts) <= 16
 
 
-def test_non_prism_becomes_placeholder():
+def test_non_prism_becomes_mesh():
     parts = brush_to_parts(mitred_bevel_strip(7))
-    assert [p.cls for p in parts] == ["Placeholder"]
+    assert [p.cls for p in parts] == ["Mesh"]

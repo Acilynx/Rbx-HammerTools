@@ -58,7 +58,7 @@ VOLUME_FAIL = 1e-2
 
 def verify_decomposition(b: Brush, parts: list[PartSpec], rng, samples=2000, warnings=None) -> str | None:
     """None if the parts reproduce the brush exactly (within decompile noise), else a message."""
-    if len(parts) < 1 or parts[0].cls == "Placeholder" or parts[0].kind == "box_axis":
+    if len(parts) < 1 or parts[0].cls in ("Placeholder", "Mesh") or parts[0].kind == "box_axis":
         return None
     want = brush_volume(b)
     got = sum(piece_volume(p) for p in parts)
@@ -94,7 +94,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             rep["skipped tool-only brush"] += 1
             continue
         parts = brush_to_parts(b)
-        rep[f"brush {parts[0].kind} -> {parts[0].cls if parts[0].cls == 'Placeholder' else str(len(parts)) + ' part(s)'}"] += 1
+        rep[f"brush {parts[0].kind} -> {parts[0].cls if parts[0].cls in ('Placeholder', 'Mesh') else str(len(parts)) + ' part(s)'}"] += 1
         if opts.verify:
             err = verify_decomposition(b, parts, rng, warnings=warnings)
             if err:
@@ -228,7 +228,16 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     # --- textures per face
     parts_out = []
     baked = {}
+    from .brushmesh import brush_mesh_record
     for b, parts in built:
+        if parts[0].cls == "Mesh":
+            rec, mblobs = brush_mesh_record(b, sizes)
+            prop_blobs.update(mblobs)
+            parts_out.append(dict(id=b.id, piece=0, cls="Mesh", owner=b.owner, entity=b.entity_name,
+                                  mat=b.dominant_material(), kind=parts[0].kind, faces=[],
+                                  s=[round(float(x), 6) for x in parts[0].size], **rec))
+            rep["brush meshes"] += 1
+            continue
         for p in parts:
             faces = []
             if sizes:
@@ -255,7 +264,8 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                                   faces=[[ft.face, ft.material, ft.swap, ft.flip_x, ft.flip_y,
                                           round(ft.studs_per_tile_u, 6), round(ft.studs_per_tile_v, 6),
                                           round(ft.offset_u, 6), round(ft.offset_v, 6)]] if ft else []))
-    face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]} | set(prop_mats)
+    mesh_mats = {m["material"] for pr in parts_out for m in pr.get("meshes", [])}
+    face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]} | set(prop_mats) | mesh_mats
     images = {m: img for m, img in images.items() if m in face_imgs}
     for m in list(images):
         for k, arr in pbr.get(m, {}).items():

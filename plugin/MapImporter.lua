@@ -351,9 +351,14 @@ function MapImporter.build(contents: string, options: Options?)
 
 	local byBrush: { [number]: { BasePart } } = {}
 	local brushModels: { [number]: Model } = {}
-	local counts = { parts = 0, textures = 0, placeholders = 0, lights = 0, props = 0 }
+	local counts = { parts = 0, textures = 0, placeholders = 0, lights = 0, props = 0, meshes = 0 }
 
+	local meshRecs = {}
 	for i, rec in ipairs(meta.parts) do
+		if rec.cls == "Mesh" then
+			table.insert(meshRecs, rec)      -- built with the props below (they share the mesh code)
+			continue
+		end
 		local placeholder = rec.cls == "Placeholder"
 		local p = Instance.new(if placeholder then "Part" else rec.cls) :: BasePart
 		p.Anchored = true
@@ -501,7 +506,7 @@ function MapImporter.build(contents: string, options: Options?)
 	-- the EditableMesh and the images).
 	local templates: { [string]: MeshPart | false } = {}
 	local templateUsed: { [string]: boolean } = {}
-	local function meshPart(sm, solid: boolean): MeshPart?
+	local function meshPart(sm, solid: boolean, fidelity: Enum.CollisionFidelity?): MeshPart?
 		local key = sm.blob .. (if solid then "|s" else "|n")
 		if templates[key] == nil then
 			templates[key] = false
@@ -510,7 +515,8 @@ function MapImporter.build(contents: string, options: Options?)
 			if em then
 				local ok, mp = pcall(function()
 					return AssetService:CreateMeshPartAsync(Content.fromObject(em), {
-						CollisionFidelity = if solid then Enum.CollisionFidelity.Default else Enum.CollisionFidelity.Box,
+						CollisionFidelity = if not solid then Enum.CollisionFidelity.Box
+							else fidelity or Enum.CollisionFidelity.Default,
 					})
 				end)
 				if ok and mp then
@@ -534,6 +540,10 @@ function MapImporter.build(contents: string, options: Options?)
 						local mm = meta.materials[sm.material]
 						if mm and mm.alpha then
 							sa.AlphaMode = Enum.AlphaMode.Transparency
+							-- Measured in Studio: at Transparency 0 the alpha is only a cut-out (any
+							-- alpha > 0 draws solid, so fences work but glass is opaque). Any value
+							-- above 0 puts the part in the transparent pass, where alpha blends.
+							mp.Transparency = 0.02
 							mp.CastShadow = false
 						end
 						sa.Parent = mp
@@ -584,6 +594,60 @@ function MapImporter.build(contents: string, options: Options?)
 		end
 	end
 
+	-- brushes the translator couldn't split into parts (bevelled trims, cylinders, domes):
+	-- one MeshPart per visible material, placed at the brush centre. Brushes are convex, so a
+	-- Hull collision is exact; when the visible faces don't span the whole brush (nodraw
+	-- sides), or there are several materials, an invisible hull of all sides collides instead.
+	for i, rec in ipairs(meshRecs) do
+		local model = Instance.new("Model")
+		model.Name = "brush_" .. rec.id
+		model:SetAttribute("SourceId", rec.id)
+		model:SetAttribute("SourceMaterial", rec.mat)
+		model:SetAttribute("SourceKind", rec.kind)
+		local cf = CFrame.new(rec.c[1], rec.c[2], rec.c[3])
+		byBrush[rec.id] = byBrush[rec.id] or {}
+		for k, sm in ipairs(rec.meshes) do
+			local mp = meshPart(sm, rec.collider == nil, Enum.CollisionFidelity.Hull)
+			if mp then
+				mp.Name = "mesh_" .. k
+				mp.CFrame = cf
+				mp:SetAttribute("SourceId", rec.id)
+				mp:SetAttribute("SourceKind", rec.kind)
+				local m = meta.materials[sm.material]
+				if m and m.texlight and opts.texlightsAsNeon ~= false then
+					local sa = mp:FindFirstChildOfClass("SurfaceAppearance")
+					if sa then sa:Destroy() end
+					mp.Material = Enum.Material.Neon
+				elseif m and m.glass then
+					mp.Color = Color3.fromRGB(m.glass[1], m.glass[2], m.glass[3])
+					mp.Transparency = opts.glassTransparency or 0.75
+					mp.CastShadow = false
+				end
+				mp.Parent = model
+				table.insert(byBrush[rec.id], mp)
+				counts.meshes += 1
+			end
+		end
+		if rec.collider then
+			local cp = meshPart({ blob = rec.collider.blob, n = rec.collider.n, m = rec.collider.m, material = "" },
+				true, Enum.CollisionFidelity.Hull)
+			if cp then
+				local sa = cp:FindFirstChildOfClass("SurfaceAppearance")
+				if sa then sa:Destroy() end
+				cp.Name = "collision"
+				cp.CFrame = cf
+				cp.Transparency, cp.CastShadow = 1, false
+				cp:SetAttribute("SourceId", rec.id)
+				cp.Parent = model
+			end
+		end
+		model.Parent = folder(folderName(rec))
+		if i % 50 == 0 then
+			progress(string.format("brush meshes %d/%d", i, #meshRecs))
+			task.wait()
+		end
+	end
+
 	root.Parent = parent
 
 	if opts.indoorLighting ~= false then
@@ -604,8 +668,8 @@ function MapImporter.build(contents: string, options: Options?)
 
 	progress("refreshing images")
 	local refreshed = MapImporter.refreshImages(root)
-	progress(string.format("done: %d parts, %d textures (%d images), %d props, %d lights, %d placeholders",
-		counts.parts, counts.textures, refreshed, counts.props, counts.lights, counts.placeholders))
+	progress(string.format("done: %d parts, %d brush meshes, %d textures (%d images), %d props, %d lights, %d placeholders",
+		counts.parts, counts.meshes, counts.textures, refreshed, counts.props, counts.lights, counts.placeholders))
 	if imageFailures > 0 then
 		warn(string.format("[MapImporter] %d images couldn't be created (EditableImage memory budget?); those maps are missing", imageFailures))
 	end

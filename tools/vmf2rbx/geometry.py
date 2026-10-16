@@ -2,8 +2,9 @@
 
 * Axis-aligned box  -> one Part (identity rotation)
 * Rotated box       -> one Part
-* Convex prism      -> exact split into Parts and WedgeParts (slab decomposition)
-* Anything else     -> a placeholder (bounding box), flagged for a CSG/mesh fallback
+* Convex prism      -> exact split into Parts and WedgeParts (slab decomposition), up to
+                       MAX_PIECES pieces
+* Anything else     -> "Mesh": converted exactly as a triangle mesh (brushmesh.py)
 
 All output is in Roblox space and studs.
 """
@@ -23,7 +24,7 @@ MAX_PIECES = 16
 
 @dataclass
 class PartSpec:
-    cls: str                 # "Part", "WedgePart" or "Placeholder"
+    cls: str                 # "Part", "WedgePart", "Mesh" (see brushmesh.py) or "Placeholder"
     center: np.ndarray       # studs, Roblox space
     size: np.ndarray         # studs, local X/Y/Z
     rot: np.ndarray          # 3x3, rows = local X, Y, Z axes in world space
@@ -225,7 +226,7 @@ def brush_to_parts(brush: Brush) -> list[PartSpec]:
         for i, p in enumerate(pieces, 1):
             p.piece, p.kind = i, kind
         return pieces
-    return [PartSpec("Placeholder", (R.min(0) + R.max(0)) / 2, R.max(0) - R.min(0), np.eye(3), 0, kind)]
+    return [PartSpec("Mesh", (R.min(0) + R.max(0)) / 2, R.max(0) - R.min(0), np.eye(3), 0, kind)]
 
 
 # ---------------------------------------------------------------- verification helpers
