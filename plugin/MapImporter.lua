@@ -197,37 +197,64 @@ end
 -- yielding, and all of them after a playtest (the pixels are still there; only the drawing is
 -- lost). Rebuilding each image once makes them draw again. The plugin calls this after the
 -- build and whenever a playtest ends.
+--
+-- Textures pick up a new image when the property is set. A SurfaceAppearance doesn't: it only
+-- reads its maps when it's parented (setting them on a parented one draws nothing, or drops
+-- maps), so each SurfaceAppearance is replaced by a clone carrying the new images.
 local MAP_PROPS = { "ColorMapContent", "NormalMapContent", "RoughnessMapContent", "MetalnessMapContent" }
 
 function MapImporter.refreshImages(root: Instance): number
-	-- group the textures by image first, then swap one image at a time, so at most one extra
-	-- image exists at any moment (EditableImages share a memory budget)
-	local users: { [EditableImage]: { { any } } } = {}
+	local textureUsers: { [EditableImage]: { { any } } } = {}
+	local appearances: { SurfaceAppearance } = {}
+	local all: { [EditableImage]: boolean } = {}
 	for _, t in ipairs(root:GetDescendants()) do
-		if t:IsA("Texture") or t:IsA("SurfaceAppearance") then
+		local isTex, isSA = t:IsA("Texture"), t:IsA("SurfaceAppearance")
+		if isTex or isSA then
+			if isSA then
+				table.insert(appearances, t)
+			end
 			for _, prop in ipairs(MAP_PROPS) do
 				local img = (t :: any)[prop].Object
 				if img and img:IsA("EditableImage") then
-					users[img] = users[img] or {}
-					table.insert(users[img], { t, prop })
+					all[img] = true
+					if isTex then
+						textureUsers[img] = textureUsers[img] or {}
+						table.insert(textureUsers[img], { t, prop })
+					end
 				end
 			end
 		end
 	end
+	local remap: { [EditableImage]: EditableImage } = {}
 	local made = 0
-	for old, list in pairs(users) do
+	for old in pairs(all) do
 		local sz = old.Size
 		local ok, img = pcall(function()
 			return AssetService:CreateEditableImage({ Size = sz })
 		end)
 		if ok and img then
 			img:WritePixelsBuffer(Vector2.zero, sz, old:ReadPixelsBuffer(Vector2.zero, sz))
-			for _, u in ipairs(list) do
+			remap[old] = img
+			for _, u in ipairs(textureUsers[old] or {}) do
 				u[1][u[2]] = Content.fromObject(img)
 			end
-			old:Destroy()
 			made += 1
 		end
+	end
+	for _, sa in ipairs(appearances) do
+		local parent = sa.Parent
+		local copy = sa:Clone()
+		for _, prop in ipairs(MAP_PROPS) do
+			local img = (sa :: any)[prop].Object
+			if img and remap[img] then
+				(copy :: any)[prop] = Content.fromObject(remap[img])
+			end
+		end
+		sa:Destroy()
+		copy.Parent = parent
+	end
+	for old in pairs(remap) do
+		old:Destroy()
 	end
 	return made
 end

@@ -66,10 +66,15 @@ def rtx_list(a) -> int:
     from .rtx import CHANNELS, match_materials, parse_replacements
     with open(a.vmf, encoding="utf-8", errors="replace") as fh:
         vmf = VMF.parse(Keyvalues.parse(fh))
-    used = sorted({s.material for b in load_vmf_brushes(vmf) for s in b.visible_sides})
+    used = {s.material for b in load_vmf_brushes(vmf) for s in b.visible_sides}
+    from .assets import _read
+    from .props import build_props
+    fsys = open_game(a.game)
+    models, *_ = build_props(vmf, fsys, lambda p: _read(fsys, p))
+    used = sorted(used | {sm["material"] for subs in models.values() for sm in subs})
     with open(a.usda, encoding="utf-8", errors="replace") as fh:
         reps = parse_replacements(fh.read())
-    matched = match_materials(open_game(a.game), used, reps)
+    matched = match_materials(fsys, used, reps)
     names = sorted({m[ch] for m in matched.values() for ch in CHANNELS if ch in m})
     with open(a.out, "w", encoding="utf-8") as fh:
         fh.write(f"# Portal RTX textures for {os.path.basename(a.vmf)}: {len(matched)} of {len(used)} materials\n")
