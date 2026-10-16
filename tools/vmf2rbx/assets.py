@@ -93,7 +93,8 @@ class MaterialInfo:
     def keeps_alpha(self) -> bool:
         """Base alpha is transparency only for translucent/alpha-tested materials. Otherwise it's
         a mask for something else ($basealphaenvmapmask, $selfillum, ...) and must be dropped."""
-        return self.params.get("$translucent") == "1" or self.params.get("$alphatest") == "1"
+        return (self.params.get("$translucent") == "1" or self.params.get("$alphatest") == "1"
+                or self.additive)
 
     @property
     def additive(self) -> bool:
@@ -121,7 +122,7 @@ def resolve_material(fsys, name: str, _depth=0) -> MaterialInfo:
     data = _read(fsys, f"materials/{name}.vmt")
     if data is None:
         return MaterialInfo(name, missing=True)
-    kv = Keyvalues.parse(data.decode("utf-8", "replace"))
+    kv = Keyvalues.parse(data.decode("utf-8", "replace"), allow_escapes=False)   # "models\props\box..." isn't \b
     root = list(kv)[0]
     params = {c.name.lower(): c.value for c in root if not c.has_children()}
     if root.real_name.lower() == "patch" and _depth < 8:
@@ -136,6 +137,9 @@ def resolve_material(fsys, name: str, _depth=0) -> MaterialInfo:
     return MaterialInfo(name, root.real_name, params)
 
 
+ADDITIVE_OPACITY = 0.6     # full white additive pixel -> this opacity (set by eye)
+
+
 def load_base_image(fsys, mat: MaterialInfo, frame: int = 0) -> Image.Image | None:
     """Base texture as RGBA, with alpha applied according to the material's flags."""
     from srctools.vtf import VTF
@@ -147,14 +151,13 @@ def load_base_image(fsys, mat: MaterialInfo, frame: int = 0) -> Image.Image | No
         return None
     vtf = VTF.read(BytesIO(data))
     img = vtf.get(frame=min(frame, vtf.frame_count - 1)).to_PIL().convert("RGBA")
-    if not mat.keeps_alpha:
+    if mat.additive:
+        # Additive materials add their colour to what's behind them: black adds nothing, bright
+        # adds a lot, whatever the alpha says. Roblox can't blend additively, so opacity comes
+        # from brightness instead. Using the VTF alpha (or 1 - alpha) got either the vault glass
+        # or the box dropper's tube wrong in Studio; brightness gets both right.
+        lum = img.convert("L")
+        img.putalpha(lum.point(lambda v: round(v * ADDITIVE_OPACITY)))
+    elif not mat.keeps_alpha:
         img.putalpha(255)
-    elif mat.additive:
-        # Roblox has no additive blending, so the alpha has to stand in for "how much this pixel
-        # shows". In Portal's additive frosted glass the alpha runs exactly opposite to the
-        # brightness (the bright frosted bands have the lowest alpha), and in game it's those
-        # bands that show while the rest is clear. Used as plain opacity it came out inverted
-        # (seen in Studio on testchmb_a_00's vault glass), so additive materials use 1 - alpha.
-        r, g, b, a = img.split()
-        img = Image.merge("RGBA", (r, g, b, a.point(lambda v: 255 - v)))
     return img

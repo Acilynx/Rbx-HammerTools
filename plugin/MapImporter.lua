@@ -47,17 +47,17 @@ local function readPackage(contents: string)
 	return meta, data, 8 + jlen
 end
 
--- An image's pixels as stored: RGBA for palettized colour images, raw W*H*ch bytes for data
--- maps (ch 1 = roughness/metalness, ch 2 = normal map right/down components).
+-- An image's pixels: RGBA for colour images (palettized "palz" or full "rgbaz"), raw W*H*ch
+-- bytes for data maps ("zstd": ch 1 = roughness/metalness, ch 2 = normal map right/down).
 local function decodeImage(data: buffer, blob0: number, img): buffer
 	local W, H = img.w, img.h
 	local src, palOff = data, blob0 + img.off
-	if img.enc == "zstd" or img.enc == "palz" then
+	if img.enc == "zstd" or img.enc == "palz" or img.enc == "rgbaz" then
 		local packed = buffer.create(img.len)
 		buffer.copy(packed, 0, data, blob0 + img.off, img.len)
 		local raw = EncodingService:DecompressBuffer(packed, Enum.CompressionAlgorithm.Zstd)
-		if img.enc == "zstd" then
-			return raw
+		if img.enc ~= "palz" then
+			return raw     -- data map, or full RGBA colour
 		end
 		src, palOff = raw, 0
 	end
