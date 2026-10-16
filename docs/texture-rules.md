@@ -33,6 +33,14 @@ Hammer side of the mapping: texel `s = (P · uaxis) / uscale + uoffset` with `P`
 (u, v) in studs; the mapping is representable exactly when s depends only on u and t only on v
 (or both swapped).
 
+## Normal maps
+
+Roblox reads a Texture's normal map as R = image right (+U), G = image **up** (−V), B = out of
+the surface, on every face of a Part or WedgePart except **Bottom**, where both R and G are
+reversed relative to the colour image. Measured in Studio by lighting test cubes from a known
+side with normal maps tilted toward image right/left/up/down; the importer flips both
+components on Bottom faces.
+
 ## Faces the tiling can't express: baked images
 
 When s depends on both u and v (the texture runs at some angle to the part's edges), no

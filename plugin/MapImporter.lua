@@ -122,8 +122,10 @@ end
 -- kind "normal": 2-channel (right, down) components; they move like pixels and also turn with
 -- the image: a transpose swaps them, a flip negates that axis (same as the translator's
 -- FaceBake.normal_matrix on 90-degree faces; tests/test_textures.py checks the two agree).
--- Roblox reads normal maps as R = image right, G = image up, B = out of the surface.
-local function orient(base: buffer, W: number, H: number, swap: boolean, fx: boolean, fy: boolean, kind: string?)
+-- Roblox reads normal maps as R = image right, G = image up, B = out of the surface, on every
+-- face except Bottom (Part and WedgePart alike), where both directions are reversed relative
+-- to the colour image (measured in Studio with lit test cubes). `bottom` compensates.
+local function orient(base: buffer, W: number, H: number, swap: boolean, fx: boolean, fy: boolean, kind: string?, bottom: boolean?)
 	local Nx, Ny = W, H
 	if swap then Nx, Ny = H, W end
 	local out = buffer.create(Nx * Ny * 4)
@@ -141,6 +143,7 @@ local function orient(base: buffer, W: number, H: number, swap: boolean, fx: boo
 				if swap then r, d = d, r end
 				if fx then r = -r end
 				if fy then d = -d end
+				if bottom then r, d = -r, -d end
 				local z = math.sqrt(math.max(0, 1 - r * r - d * d))
 				buffer.writeu8(out, o, math.clamp(math.round((r + 1) * 127.5), 0, 255))
 				buffer.writeu8(out, o + 1, math.clamp(math.round((1 - d) * 127.5), 0, 255))
@@ -318,14 +321,15 @@ function MapImporter.build(contents: string, options: Options?)
 	local variants: { [string]: EditableImage | false } = {}
 	imageFailures = 0
 	table.clear(flatCache)
-	local function variantFor(name: string, swap: boolean, fx: boolean, fy: boolean): EditableImage?
+	local function variantFor(name: string, swap: boolean, fx: boolean, fy: boolean, bottom: boolean?): EditableImage?
 		local im = imageMeta[name]
 		if not im then return nil end
-		local key = name .. "|" .. tostring(swap) .. tostring(fx) .. tostring(fy)
+		local kind = if im.enc ~= "zstd" then "color" elseif im.ch == 2 then "normal" else "gray"
+		bottom = bottom == true and kind == "normal"
+		local key = name .. "|" .. tostring(swap) .. tostring(fx) .. tostring(fy) .. (if bottom then "|b" else "")
 		if variants[key] == nil then
 			bases[name] = bases[name] or decodeImage(data, blob0, im)
-			local kind = if im.enc ~= "zstd" then "color" elseif im.ch == 2 then "normal" else "gray"
-			variants[key] = orient(bases[name], im.w, im.h, swap, fx, fy, kind) or false
+			variants[key] = orient(bases[name], im.w, im.h, swap, fx, fy, kind, bottom) or false
 		end
 		return variants[key] or nil
 	end
@@ -334,9 +338,9 @@ function MapImporter.build(contents: string, options: Options?)
 	-- from the material. Without any, textures get a flat full roughness (matte): Source's
 	-- lightmapped surfaces have no specular unless the material asks for an envmap, and a
 	-- part's default roughness makes every texture look polished.
-	local function pbrFor(key: string, mat: string, swap: boolean, fx: boolean, fy: boolean)
+	local function pbrFor(key: string, mat: string, swap: boolean, fx: boolean, fy: boolean, face: string?)
 		local consts = (meta.materials[mat] or {}).pbr or {}
-		local n = variantFor(key .. "#n", swap, fx, fy)
+		local n = variantFor(key .. "#n", swap, fx, fy, face == "Bottom")
 		local r = variantFor(key .. "#r", swap, fx, fy)
 			or (if consts.r then flatImage(consts.r) elseif opts.matte ~= false then flatImage(255) else nil)
 		local m = variantFor(key .. "#m", swap, fx, fy) or (if consts.m then flatImage(consts.m) else nil)
@@ -416,7 +420,7 @@ function MapImporter.build(contents: string, options: Options?)
 					t.StudsPerTileU, t.StudsPerTileV = su, sv
 					t.OffsetStudsU, t.OffsetStudsV = ou, ov
 					t.ColorMapContent = Content.fromObject(img)
-					local nImg, rImg, mImg, eImg, eStrength = pbrFor(imgKey or mat, mat, swap, fx, fy)
+					local nImg, rImg, mImg, eImg, eStrength = pbrFor(imgKey or mat, mat, swap, fx, fy, face)
 					if nImg then t.NormalMapContent = Content.fromObject(nImg) end
 					if rImg then t.RoughnessMapContent = Content.fromObject(rImg) end
 					if mImg then t.MetalnessMapContent = Content.fromObject(mImg) end
