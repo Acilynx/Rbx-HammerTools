@@ -29,14 +29,75 @@ CHOOSE = "Other game folder..."
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def builder_python() -> str:
-    """The interpreter that runs the build: this one, but python.exe rather than pythonw.exe
-    (pythonw has no stdout to stream)."""
-    exe = os.environ.get("VMF2RBX_PYTHON") or sys.executable
+SUPPORTED = ((3, 10), (3, 14))     # Pythons srctools/numpy ship ready-built packages for
+PREFERRED = (3, 13)
+
+
+def _console(exe: str) -> str:
+    """python.exe rather than pythonw.exe (pythonw has no stdout to stream)."""
     d, name = os.path.split(exe)
     if name.lower() == "pythonw.exe" and os.path.isfile(os.path.join(d, "python.exe")):
-        exe = os.path.join(d, "python.exe")
+        return os.path.join(d, "python.exe")
     return exe
+
+
+def parse_py_list(text: str) -> list[tuple[tuple[int, int], str]]:
+    """`py -0p` output -> [((major, minor), path)]. Lines look like
+    ' -V:3.13 *        C:\\...\\python.exe' (newer launcher) or ' -3.13-64        C:\\...'."""
+    import re
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"\s*-(?:V:)?(\d+)\.(\d+)\S*\s+(?:\*\s+)?(.+?\.exe)\s*$", line, re.I)
+        if m:
+            out.append(((int(m.group(1)), int(m.group(2))), m.group(3)))
+    return out
+
+
+def installed_pythons() -> list[tuple[tuple[int, int], str]]:
+    """This interpreter plus the ones the Windows py launcher knows about."""
+    found = [(sys.version_info[:2], _console(sys.executable))]
+    try:
+        r = subprocess.run(["py", "-0p"], capture_output=True, text=True, creationflags=NO_WINDOW, timeout=20)
+        found += [(v, _console(p)) for v, p in parse_py_list(r.stdout + r.stderr)]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    seen, out = set(), []
+    for v, p in found:
+        k = os.path.normcase(os.path.abspath(p))
+        if k not in seen and os.path.isfile(p):
+            seen.add(k)
+            out.append((v, p))
+    return out
+
+
+def has_packages(exe: str) -> bool:
+    try:
+        return subprocess.run([exe, "-c", NEEDED], capture_output=True, creationflags=NO_WINDOW,
+                              timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def choose_python(pythons, has=has_packages) -> tuple[str | None, bool]:
+    """(interpreter for the build, whether it already has the packages). Prefers one that has
+    them; otherwise a supported version to install into (3.13 first): a Python newer than
+    srctools supports can't install it without a C compiler."""
+    rank = lambda vp: (vp[0] != PREFERRED, -vp[0][1])
+    for v, p in sorted(pythons, key=rank):
+        if has(p):
+            return p, True
+    ok = [vp for vp in pythons if SUPPORTED[0] <= vp[0] <= SUPPORTED[1]]
+    return (sorted(ok, key=rank)[0][1], False) if ok else (None, False)
+
+
+_BUILDER: list = []
+
+
+def builder_python() -> str:
+    """The interpreter that runs the build (chosen once per session by App.check_packages)."""
+    if os.environ.get("VMF2RBX_PYTHON"):
+        return os.environ["VMF2RBX_PYTHON"]
+    return _BUILDER[0] if _BUILDER else _console(sys.executable)
 
 
 def settings_path() -> str:
@@ -225,15 +286,24 @@ class App:
 
     # ------------------------------------------------------------------ running things
     def check_packages(self):
-        r = subprocess.run([builder_python(), "-c", NEEDED], capture_output=True, text=True, creationflags=NO_WINDOW)
-        if r.returncode != 0:
-            self.say(f"Some Python packages the converter needs are missing ({builder_python()}).")
+        if os.environ.get("VMF2RBX_PYTHON"):
+            exe, ready = os.environ["VMF2RBX_PYTHON"], has_packages(os.environ["VMF2RBX_PYTHON"])
+        else:
+            exe, ready = choose_python(installed_pythons())
+        _BUILDER[:] = [exe] if exe else []
+        if exe is None:
+            self.say("No usable Python found: install Python 3.13 from python.org, then reopen this window.")
+            self.build_btn.configure(state="disabled")
+            return
+        if ready:
+            self.say(f"Using {exe}")
+            self.install_btn.pack_forget()
+            self.build_btn.configure(state="normal")
+        else:
+            self.say(f"The Python packages the converter needs aren't installed yet ({exe}).")
             self.say("Press 'Install required Python packages' (needs an internet connection).")
             self.install_btn.pack(side="left", padx=6)
             self.build_btn.configure(state="disabled")
-        else:
-            self.install_btn.pack_forget()
-            self.build_btn.configure(state="normal")
 
     def install(self):
         self.run([builder_python(), "-m", "pip", "install", "-r", REQUIREMENTS], "Installing packages...",
