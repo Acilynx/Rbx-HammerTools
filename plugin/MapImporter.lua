@@ -376,6 +376,12 @@ function MapImporter.build(contents: string, options: Options?)
 			if m and m.texlight and opts.texlightsAsNeon ~= false then
 				p.Material = Enum.Material.Neon
 			end
+			if rec.kind == "overlay" then
+				-- info_overlay: a paper-thin part just off the surface; only its texture shows
+				p.Transparency = 1
+				p.CanCollide, p.CanQuery, p.CanTouch = false, false, false
+				p.CastShadow = false
+			end
 			if m and m.glass then
 				-- Refract glass (observation windows): Source draws the room behind it, tinted.
 				-- See-through in the tint colour, and no shadow so lights shine through.

@@ -75,19 +75,17 @@ def find_side(brush: Brush, part: PartSpec, face: str, plane_tol=2e-3) -> Side |
     return None
 
 
-def map_face(part: PartSpec, face: str, side: Side, tex_w: int, tex_h: int):
-    """Roblox Texture parameters reproducing Hammer's alignment on this face.
+def map_linear(part: PartSpec, face: str, gs, s_off: float, gt, t_off: float, material: str,
+               tex_w: int, tex_h: int):
+    """Roblox Texture parameters for a face whose texel coordinates are linear in world
+    (Roblox, studs) position: s = gs . P + s_off, t = gt . P + t_off (t runs down the image).
 
     Returns a FaceTex, or None if the mapping isn't a multiple of 90 degrees."""
     O, Ut, Vt, _ = face_frame(part.cls, part.size, face)
     Rm = part.rot.T
     Ow, Uw, Vw = part.center + Rm @ O, Rm @ Ut, Rm @ Vt
-
-    def linear(ax):
-        g = to_roblox(ax.vec) / (SPU * ax.scale)     # texels per stud (as a Roblox-space gradient)
-        return Ow @ g + ax.offset, Uw @ g, Vw @ g    # texel = c0 + kU*u + kV*v
-    s0, sU, sV = linear(side.u)
-    t0, tU, tV = linear(side.v)
+    s0, sU, sV = Ow @ gs + s_off, Uw @ gs, Vw @ gs     # texel = c0 + kU*u + kV*v
+    t0, tU, tV = Ow @ gt + t_off, Uw @ gt, Vw @ gt
     eps = 1e-6 * max(abs(sU), abs(sV), abs(tU), abs(tV))
     if abs(sV) < eps and abs(tU) < eps:
         swap, ax_u, ax_v = False, (sU, s0, tex_w), (tV, t0, tex_h)
@@ -104,7 +102,16 @@ def map_face(part: PartSpec, face: str, side: Side, tex_w: int, tex_h: int):
         return flip, spt, (c0 / k) % spt
     fx, spt_u, off_u = axis(*ax_u)
     fy, spt_v, off_v = axis(*ax_v)
-    return FaceTex(face, side.material, bool(swap), bool(fx), bool(fy), spt_u, spt_v, off_u, off_v)
+    return FaceTex(face, material, bool(swap), bool(fx), bool(fy), spt_u, spt_v, off_u, off_v)
+
+
+def map_face(part: PartSpec, face: str, side: Side, tex_w: int, tex_h: int):
+    """Roblox Texture parameters reproducing Hammer's alignment on this face.
+
+    Returns a FaceTex, or None if the mapping isn't a multiple of 90 degrees."""
+    gs = to_roblox(side.u.vec) / (SPU * side.u.scale)     # texels per stud (as a Roblox-space gradient)
+    gt = to_roblox(side.v.vec) / (SPU * side.v.scale)
+    return map_linear(part, face, gs, side.u.offset, gt, side.v.offset, side.material, tex_w, tex_h)
 
 
 BAKE_MAX_PX = 512      # longest side of a baked face image

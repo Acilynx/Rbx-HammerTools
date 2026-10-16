@@ -26,6 +26,7 @@ class BuildOptions:
     rtxb: str | None = None            # textures pulled by tools/rtx_extract.py
     rtx_albedo: bool = True            # use the RTX albedo instead of the original texture
     props: bool = True                 # prop_static / prop_dynamic / prop_physics as meshes
+    overlays: bool = True              # info_overlay decals as thin parts
 
 
 @dataclass
@@ -113,7 +114,9 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         for k, v in prep.items():
             rep[f"props: {k}"] += v
     prop_mats = sorted({sm["material"] for subs in prop_models.values() for sm in subs})
-    used = sorted(set(used) | set(prop_mats))
+    overlay_mats = sorted({(e["material"] or "").replace("\\", "/").lower()
+                           for e in vmf.entities if e["classname"] == "info_overlay"} - {""}) if opts.overlays else []
+    used = sorted(set(used) | set(prop_mats) | set(overlay_mats))
     mats, images, sizes, avg_colors = {}, {}, {}, {}
     if opts.textures and fsys is not None:
         for m in used:
@@ -237,6 +240,21 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                 rep["textured faces"] += len(faces)
                 rep["baked faces"] += sum(1 for f in faces if f.image)
             parts_out.append(_part_record(b, p, faces))
+
+    # --- overlays: thin see-through parts in front of the surfaces they decorate
+    if opts.overlays:
+        from .overlays import overlay_parts
+        ov, _, orep = overlay_parts(vmf, sizes, opts.region)
+        for k, v in orep.items():
+            rep[k] += v
+        for i, (p, ft, info) in enumerate(ov):
+            parts_out.append(dict(id=-(i + 1), piece=0, cls="Part", owner="info_overlay", entity=info["name"],
+                                  mat=info["material"], kind="overlay",
+                                  c=[round(float(x), 6) for x in p.center], s=[round(float(x), 6) for x in p.size],
+                                  r=[round(float(x), 6) for x in p.rot.flatten()],
+                                  faces=[[ft.face, ft.material, ft.swap, ft.flip_x, ft.flip_y,
+                                          round(ft.studs_per_tile_u, 6), round(ft.studs_per_tile_v, 6),
+                                          round(ft.offset_u, 6), round(ft.offset_v, 6)]] if ft else []))
     face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]} | set(prop_mats)
     images = {m: img for m, img in images.items() if m in face_imgs}
     for m in list(images):
