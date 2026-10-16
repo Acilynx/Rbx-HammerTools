@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 import numpy as np
+from PIL import Image
 
 from .brushes import Brush, load_vmf_brushes
 from .coords import point_to_roblox
@@ -24,6 +25,7 @@ class BuildOptions:
     rtx_usda: str | None = None        # Portal RTX replacement layer (portal_rtx_replacements.usda)
     rtxb: str | None = None            # textures pulled by tools/rtx_extract.py
     rtx_albedo: bool = True            # use the RTX albedo instead of the original texture
+    props: bool = True                 # prop_static / prop_dynamic / prop_physics as meshes
 
 
 @dataclass
@@ -31,6 +33,7 @@ class BuildResult:
     meta: dict
     images: dict
     report: dict = field(default_factory=dict)
+    blobs: dict = field(default_factory=dict)      # raw byte blobs (prop meshes), zstd in the package
 
 
 def _part_record(b: Brush, p: PartSpec, faces) -> dict:
@@ -43,6 +46,8 @@ def _part_record(b: Brush, p: PartSpec, faces) -> dict:
                         round(f.offset_u, 6), round(f.offset_v, 6)] + ([f.image] if f.image else [])
                        for f in faces])
 
+
+MAX_IMAGE = 1024
 
 VOLUME_WARN = 1e-3   # relative; decompiled VMFs carry float noise (planes ~0.03 deg off parallel)
 VOLUME_FAIL = 1e-2
@@ -96,6 +101,17 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     # --- materials and images
     from . import assets
     used = sorted({s.material for b, _ in built for s in b.visible_sides})
+
+    # --- props (meshes per model; their materials join the texture loading below)
+    prop_models, prop_blobs, prop_instances, prop_missing = {}, {}, [], []
+    if opts.props and fsys is not None:
+        from .props import build_props
+        prop_models, prop_blobs, prop_instances, prep, prop_missing = build_props(
+            vmf, fsys, lambda p: assets._read(fsys, p), opts.region)
+        for k, v in prep.items():
+            rep[f"props: {k}"] += v
+    prop_mats = sorted({sm["material"] for subs in prop_models.values() for sm in subs})
+    used = sorted(set(used) | set(prop_mats))
     mats, images, sizes, avg_colors = {}, {}, {}, {}
     if opts.textures and fsys is not None:
         for m in used:
@@ -105,8 +121,11 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             if img is None:
                 rep["material without loadable texture"] += 1
                 continue
+            sizes[m] = (img.width, img.height)          # texel space: always the original size
+            if max(img.size) > MAX_IMAGE:                # EditableImages are at most 1024 px
+                k = MAX_IMAGE / max(img.size)
+                img = img.resize((max(1, round(img.width * k)), max(1, round(img.height * k))), Image.Resampling.LANCZOS)
             images[m] = img
-            sizes[m] = (img.width, img.height)
             avg_colors[m] = [int(round(c)) for c in np.asarray(img.convert("RGB"), float).reshape(-1, 3).mean(0)]
 
     # --- Portal RTX replacements: PBR maps (and albedo) for the materials it covers
@@ -174,7 +193,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                 rep["textured faces"] += len(faces)
                 rep["baked faces"] += sum(1 for f in faces if f.image)
             parts_out.append(_part_record(b, p, faces))
-    face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]}
+    face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]} | set(prop_mats)
     images = {m: img for m, img in images.items() if m in face_imgs}
     for m in list(images):
         for k, arr in pbr.get(m, {}).items():
@@ -200,10 +219,13 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                            pbr=pbr_const.get(m))     # flat roughness/metalness values, RTX hash
                    for m in used},
         lights=dict(surface=light_rep.surface, points=light_rep.points) if light_rep else dict(surface=[], points=[]),
+        models=prop_models,
+        props=prop_instances,
     )
     report = dict(counts=dict(sorted(rep.items())), problems=problems, warnings=warnings,
                   parts=Counter(p["cls"] for p in parts_out),
                   images=len(images),
                   variants=len({(f[1], f[2], f[3], f[4]) for pr in parts_out for f in pr["faces"]}),
                   unmatched_light_patches=light_rep.unmatched_patches if light_rep else None)
-    return BuildResult(meta, images, report)
+    report["missing_models"] = prop_missing
+    return BuildResult(meta, images, report, prop_blobs)

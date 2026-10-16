@@ -11,9 +11,11 @@ def test_round_trip(tmp_path):
     meta, blob = read_package(str(path))
     assert meta["parts"] == [{"id": 1}] and meta["version"] == 2
     m = meta["images"][0]
-    assert (m["name"], m["w"], m["h"]) == ("a/b", 32, 16)
-    pal = blob[m["off"]: m["off"] + 4 * m["ncol"]]
-    idx = blob[m["off"] + 4 * m["ncol"]: m["off"] + 4 * m["ncol"] + 32 * 16]
+    assert (m["name"], m["w"], m["h"], m["enc"]) == ("a/b", 32, 16, "palz")
+    import zstandard
+    raw = zstandard.ZstdDecompressor().decompress(blob[m["off"]: m["off"] + m["len"]])
+    pal = raw[: 4 * m["ncol"]]
+    idx = raw[4 * m["ncol"]: 4 * m["ncol"] + 32 * 16]
     assert len(idx) == 512 and max(idx) < m["ncol"] and len(pal) == 4 * m["ncol"]
 
 

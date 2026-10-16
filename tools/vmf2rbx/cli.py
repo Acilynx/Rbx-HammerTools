@@ -19,6 +19,7 @@ def main(argv=None) -> int:
     b.add_argument("--no-verify", action="store_true", help="skip the per-brush decomposition self-check")
     b.add_argument("--rtx-usda", help="Portal RTX's portal_rtx_replacements.usda (with --rtxb: PBR maps)")
     b.add_argument("--rtxb", help="textures pulled by tools/rtx_extract.py")
+    b.add_argument("--no-props", action="store_true", help="leave out prop_static/dynamic/physics models")
     b.add_argument("-o", "--out", required=True)
     b.add_argument("--report", help="also write the build report as JSON")
     r = sub.add_parser("rtx-list", help="list the Portal RTX textures a map needs (input for tools/rtx_extract.py)")
@@ -45,10 +46,10 @@ def main(argv=None) -> int:
     region = (a.region[:3], a.region[3:]) if a.region else None
     res = build(vmf, fsys, bsp, BuildOptions(region=region, textures=fsys is not None,
                                              lights=bsp is not None, verify=not a.no_verify,
-                                             rtx_usda=a.rtx_usda, rtxb=a.rtxb))
+                                             rtx_usda=a.rtx_usda, rtxb=a.rtxb, props=not a.no_props))
     import os
     res.meta["map"] = os.path.splitext(os.path.basename(a.vmf))[0].removesuffix("_d")
-    size = write_package(a.out, res.meta, res.images)
+    size = write_package(a.out, res.meta, res.images, res.blobs)
     print(f"wrote {a.out} ({size / 1e6:.2f} MB)")
     print(json.dumps(res.report, indent=1, default=str))
     if a.report:

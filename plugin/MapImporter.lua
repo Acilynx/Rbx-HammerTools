@@ -2,7 +2,7 @@
 -- MapImporter (ModuleScript)
 --
 -- Builds a .htmp map package (written by tools/vmf2rbx) into the place:
--- parts, per-face textures, texture lights, point/spot lights and the spawn point.
+-- parts, per-face textures, props (MeshParts), texture lights, point/spot lights and the spawn.
 --
 -- Textures are EditableImages in this version ("preview mode"): they live only in the current
 -- Studio session, don't survive saving, and are missing during playtests (the plugin redraws
@@ -51,18 +51,55 @@ end
 -- maps (ch 1 = roughness/metalness, ch 2 = normal map right/down components).
 local function decodeImage(data: buffer, blob0: number, img): buffer
 	local W, H = img.w, img.h
-	if img.enc == "zstd" then
+	local src, palOff = data, blob0 + img.off
+	if img.enc == "zstd" or img.enc == "palz" then
 		local packed = buffer.create(img.len)
 		buffer.copy(packed, 0, data, blob0 + img.off, img.len)
-		return EncodingService:DecompressBuffer(packed, Enum.CompressionAlgorithm.Zstd)
+		local raw = EncodingService:DecompressBuffer(packed, Enum.CompressionAlgorithm.Zstd)
+		if img.enc == "zstd" then
+			return raw
+		end
+		src, palOff = raw, 0
 	end
-	local palOff = blob0 + img.off
 	local idxOff = palOff + img.ncol * 4
 	local out = buffer.create(W * H * 4)
 	for i = 0, W * H - 1 do
-		buffer.writeu32(out, i * 4, buffer.readu32(data, palOff + buffer.readu8(data, idxOff + i) * 4))
+		buffer.writeu32(out, i * 4, buffer.readu32(src, palOff + buffer.readu8(src, idxOff + i) * 4))
 	end
 	return out
+end
+
+local function readBlob(data: buffer, blob0: number, b): buffer
+	local packed = buffer.create(b.len)
+	buffer.copy(packed, 0, data, blob0 + b.off, b.len)
+	return EncodingService:DecompressBuffer(packed, Enum.CompressionAlgorithm.Zstd)
+end
+
+-- A prop mesh blob (see tools/vmf2rbx/props.py) -> EditableMesh. Positions are part-local
+-- (already centred), triangles counter-clockwise from outside, uv v down the image.
+local function buildMesh(raw: buffer, n: number, m: number): EditableMesh?
+	local ok, em = pcall(function()
+		return AssetService:CreateEditableMesh()
+	end)
+	if not ok or not em then
+		return nil
+	end
+	local vids, nids, uids = table.create(n), table.create(n), table.create(n)
+	local nOff, uOff, tOff = n * 12, n * 24, n * 32
+	for i = 0, n - 1 do
+		vids[i + 1] = em:AddVertex(Vector3.new(buffer.readf32(raw, i * 12), buffer.readf32(raw, i * 12 + 4), buffer.readf32(raw, i * 12 + 8)))
+		nids[i + 1] = em:AddNormal(Vector3.new(buffer.readf32(raw, nOff + i * 12), buffer.readf32(raw, nOff + i * 12 + 4), buffer.readf32(raw, nOff + i * 12 + 8)))
+		uids[i + 1] = em:AddUV(Vector2.new(buffer.readf32(raw, uOff + i * 8), buffer.readf32(raw, uOff + i * 8 + 4)))
+	end
+	for t = 0, m - 1 do
+		local a = buffer.readu32(raw, tOff + t * 12) + 1
+		local b = buffer.readu32(raw, tOff + t * 12 + 4) + 1
+		local c = buffer.readu32(raw, tOff + t * 12 + 8) + 1
+		local f = em:AddTriangle(vids[a], vids[b], vids[c])
+		em:SetFaceNormals(f, { nids[a], nids[b], nids[c] })
+		em:SetFaceUVs(f, { uids[a], uids[b], uids[c] })
+	end
+	return em
 end
 
 -- EditableImages share a memory budget; when it runs out, the map loses that one map instead
@@ -167,7 +204,7 @@ function MapImporter.refreshImages(root: Instance): number
 	-- image exists at any moment (EditableImages share a memory budget)
 	local users: { [EditableImage]: { { any } } } = {}
 	for _, t in ipairs(root:GetDescendants()) do
-		if t:IsA("Texture") then
+		if t:IsA("Texture") or t:IsA("SurfaceAppearance") then
 			for _, prop in ipairs(MAP_PROPS) do
 				local img = (t :: any)[prop].Object
 				if img and img:IsA("EditableImage") then
@@ -281,7 +318,7 @@ function MapImporter.build(contents: string, options: Options?)
 
 	local byBrush: { [number]: { BasePart } } = {}
 	local brushModels: { [number]: Model } = {}
-	local counts = { parts = 0, textures = 0, placeholders = 0, lights = 0 }
+	local counts = { parts = 0, textures = 0, placeholders = 0, lights = 0, props = 0 }
 
 	for i, rec in ipairs(meta.parts) do
 		local placeholder = rec.cls == "Placeholder"
@@ -414,6 +451,92 @@ function MapImporter.build(contents: string, options: Options?)
 		counts.lights += 1
 	end
 
+	-- props: one MeshPart per (model, material), built once and cloned per placement
+	local blobMeta = {}
+	for _, b in ipairs(meta.blobs or {}) do blobMeta[b.name] = b end
+	-- The first placement of a mesh uses the MeshPart itself; later ones clone it (clones share
+	-- the EditableMesh and the images).
+	local templates: { [string]: MeshPart | false } = {}
+	local templateUsed: { [string]: boolean } = {}
+	local function meshPart(sm, solid: boolean): MeshPart?
+		local key = sm.blob .. (if solid then "|s" else "|n")
+		if templates[key] == nil then
+			templates[key] = false
+			local b = blobMeta[sm.blob]
+			local em = b and buildMesh(readBlob(data, blob0, b), sm.n, sm.m)
+			if em then
+				local ok, mp = pcall(function()
+					return AssetService:CreateMeshPartAsync(Content.fromObject(em), {
+						CollisionFidelity = if solid then Enum.CollisionFidelity.Default else Enum.CollisionFidelity.Box,
+					})
+				end)
+				if ok and mp then
+					mp.Anchored = true
+					mp.CanCollide, mp.CanQuery, mp.CanTouch = solid, solid, solid
+					mp.Material = Enum.Material.SmoothPlastic
+					mp.Color = colorOf(meta, sm.material)
+					mp:SetAttribute("SourceMaterial", sm.material)
+					local img = variantFor(sm.material, false, false, false)
+					if img then
+						local sa = Instance.new("SurfaceAppearance")
+						sa.ColorMapContent = Content.fromObject(img)
+						local nImg, rImg, mImg = pbrFor(sm.material, sm.material, false, false, false)
+						if nImg then sa.NormalMapContent = Content.fromObject(nImg) end
+						if rImg then sa.RoughnessMapContent = Content.fromObject(rImg) end
+						if mImg then sa.MetalnessMapContent = Content.fromObject(mImg) end
+						local mm = meta.materials[sm.material]
+						if mm and mm.alpha then
+							sa.AlphaMode = Enum.AlphaMode.Transparency
+							mp.CastShadow = false
+						end
+						sa.Parent = mp
+					end
+					templates[key] = mp
+				end
+			end
+		end
+		local tpl = templates[key]
+		if not tpl then
+			return nil
+		end
+		if not templateUsed[key] then
+			templateUsed[key] = true
+			return tpl
+		end
+		return tpl:Clone()
+	end
+	local propFolder = folder("Props")
+	for i, inst in ipairs(meta.props or {}) do
+		local subs = meta.models and meta.models[inst.model]
+		if subs then
+			local model = Instance.new("Model")
+			local stem = inst.model:match("([^/|]+)|") or "prop"
+			model.Name = if inst.name ~= "" then inst.name else stem
+			model:SetAttribute("SourceClass", inst.cls)
+			model:SetAttribute("SourceModel", (inst.model:match("^[^|]+")))
+			if inst.parent ~= "" then model:SetAttribute("SourceParent", inst.parent) end
+			local cf = cframeOf(inst.c, inst.r)
+			for k, sm in ipairs(subs) do
+				local mp = meshPart(sm, inst.solid)
+				if mp then
+					mp.Name = "mesh_" .. k
+					mp.CFrame = cf * CFrame.new(sm.centre[1], sm.centre[2], sm.centre[3])
+					local sa = mp:FindFirstChildOfClass("SurfaceAppearance")
+					if sa then
+						sa.Color = Color3.fromRGB(inst.color[1], inst.color[2], inst.color[3])
+					end
+					mp.Parent = model
+				end
+			end
+			model.Parent = propFolder
+			counts.props += 1
+		end
+		if i % 20 == 0 then
+			progress(string.format("props %d/%d", i, #meta.props))
+			task.wait()
+		end
+	end
+
 	root.Parent = parent
 
 	if opts.indoorLighting ~= false then
@@ -434,8 +557,8 @@ function MapImporter.build(contents: string, options: Options?)
 
 	progress("refreshing images")
 	local refreshed = MapImporter.refreshImages(root)
-	progress(string.format("done: %d parts, %d textures (%d images), %d lights, %d placeholders",
-		counts.parts, counts.textures, refreshed, counts.lights, counts.placeholders))
+	progress(string.format("done: %d parts, %d textures (%d images), %d props, %d lights, %d placeholders",
+		counts.parts, counts.textures, refreshed, counts.props, counts.lights, counts.placeholders))
 	if imageFailures > 0 then
 		warn(string.format("[MapImporter] %d images couldn't be created (EditableImage memory budget?); those maps are missing", imageFailures))
 	end
