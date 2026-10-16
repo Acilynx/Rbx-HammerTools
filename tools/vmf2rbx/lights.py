@@ -161,6 +161,22 @@ class LightReport:
     surface: list = field(default_factory=list)         # per emitting face
     points: list = field(default_factory=list)          # point and spot lights
     unmatched_patches: int = 0
+    dark_lights: int = 0                                # point/spot lights too dim (or negative) to use
+
+
+def fade_distance(attn, lum: float, cutoff: float) -> float | None:
+    """Distance (Source units) where lum / (c + l d + q d^2) drops to `cutoff`, or None when
+    the light never reaches the cutoff at all (zero or negative brightness: Source allows
+    negative "darkness" lights; or a large constant term)."""
+    c, l, q = attn
+    k = c - lum / cutoff                 # q d^2 + l d + k = 0
+    if lum <= 0 or k >= 0:
+        return None
+    if q > 0:
+        return (-l + math.sqrt(l * l - 4 * q * k)) / (2 * q)    # k < 0: discriminant > l^2
+    if l > 0:
+        return -k / l
+    return 1e9                           # no falloff
 
 
 def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=LightTuning(),
@@ -198,7 +214,9 @@ def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=Li
         by_mat[s.material][0] += np.sum([w.intensity for w in ws], 0)
         by_mat[s.material][1] += _area(fv, s.normal)
     for m, (I, A) in by_mat.items():
-        rad = I / A
+        rad = I / A if A > 0 else I
+        if rad.max() <= 0:
+            rad = np.full(3, 1e-9)
         rep.texlights[m] = dict(radiance=rad.tolist(),
                                 color=[c / 255 for c in _tint(rad / rad.max(), tuning.saturation)])
     for idx, ws in hits.items():
@@ -207,7 +225,7 @@ def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=Li
             continue
         I = np.sum([w.intensity for w in ws], 0)
         tl = rep.texlights[s.material]
-        rng = min(reach_cap(fv.mean(0), [s.normal]), math.sqrt(I.mean() / tuning.cutoff) * SPU)
+        rng = min(reach_cap(fv.mean(0), [s.normal]), math.sqrt(max(0.0, float(I.mean())) / tuning.cutoff) * SPU)
         rep.surface.append(dict(brush=b.id, material=s.material, normal=to_roblox(s.normal).tolist(),
                                 color=[round(255 * c) for c in tl["color"]],
                                 brightness=tuning.surface_brightness_per_radiance * float(np.mean(tl["radiance"])),
@@ -216,13 +234,10 @@ def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=Li
         if wl.type not in ("point", "spot"):
             continue
         lum = float(wl.intensity.mean())
-        c, l, q = wl.attn
-        if q > 0:
-            d = (-l + math.sqrt(l * l - 4 * q * (c - lum / tuning.cutoff))) / (2 * q)
-        elif l > 0:
-            d = (lum / tuning.cutoff - c) / l
-        else:
-            d = 1e9
+        d = fade_distance(wl.attn, lum, tuning.cutoff)
+        if d is None or wl.intensity.max() <= 0:
+            rep.dark_lights += 1
+            continue
         rec = dict(kind=wl.type, position=(to_roblox(wl.origin) * SPU).tolist(), direction=to_roblox(wl.normal).tolist(),
                    color=_tint(wl.intensity / wl.intensity.max(), tuning.saturation),
                    brightness=lum / tuning.point_brightness_divisor,

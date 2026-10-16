@@ -56,7 +56,7 @@ class Brush:
 
     def dominant_material(self) -> str:
         mats = [s.material for s in self.visible_sides] or [s.material for s in self.sides]
-        return max(set(mats), key=mats.count)
+        return max(dict.fromkeys(mats), key=mats.count)      # ties: first side wins (set order varies per run)
 
 
 def _intersections(normals: np.ndarray, dists: np.ndarray) -> np.ndarray:

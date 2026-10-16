@@ -4,7 +4,7 @@ import math
 import numpy as np
 
 from helpers import box
-from vmf2rbx.lights import cone_dirs, ray_reach, solid_planes
+from vmf2rbx.lights import cone_dirs, fade_distance, ray_reach, solid_planes
 
 
 def room():
@@ -46,3 +46,18 @@ def test_cone_dirs():
         assert abs(np.linalg.norm(d) - 1) < 1e-9
     angles = sorted(math.degrees(math.acos(-d[2])) for d in dirs)
     assert angles[0] < 1e-6 and all(abs(a - 28) < 1e-6 for a in angles[1:])
+
+
+def test_fade_distance_solves_attenuation():
+    for attn in [(0, 0, 1), (0, 1, 0), (1, 0.5, 0.01), (0.2, 0, 0.003)]:
+        d = fade_distance(attn, 200.0, 0.05)
+        c, l, q = attn
+        assert math.isclose(200.0 / (c + l * d + q * d * d), 0.05, rel_tol=1e-9)
+
+
+def test_fade_distance_lights_that_never_reach_the_cutoff():
+    # escape_00 crashed here: the quadratic has no real root
+    assert fade_distance((0, 0, 1), 0.0, 0.05) is None          # zero brightness
+    assert fade_distance((0, 0, 1), -50.0, 0.05) is None        # negative "darkness" light
+    assert fade_distance((100, 0, 1), 2.0, 0.05) is None        # constant term too large
+    assert fade_distance((0, 0, 0), 5.0, 0.05) == 1e9           # no falloff at all

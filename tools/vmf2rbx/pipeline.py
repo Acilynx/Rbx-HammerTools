@@ -288,6 +288,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                   parts=Counter(p["cls"] for p in parts_out),
                   images=len(images),
                   variants=len({(f[1], f[2], f[3], f[4]) for pr in parts_out for f in pr["faces"]}),
-                  unmatched_light_patches=light_rep.unmatched_patches if light_rep else None)
+                  unmatched_light_patches=light_rep.unmatched_patches if light_rep else None,
+                  dark_lights_skipped=light_rep.dark_lights if light_rep else None)
     report["missing_models"] = prop_missing
     return BuildResult(meta, images, report, prop_blobs)
