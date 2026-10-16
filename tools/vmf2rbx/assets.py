@@ -26,9 +26,47 @@ def open_game(game_dir: str):
     machine without Steam still works."""
     try:
         from srctools.game import Game
-        return Game(game_dir).get_filesystem()
+        chain = Game(game_dir).get_filesystem()
     except Exception:
-        return _search_paths_filesystem(game_dir)
+        chain = _search_paths_filesystem(game_dir)
+    return _mount_dir_vpks(chain)
+
+
+def with_bsp_pakfile(fsys, bsp_bytes: bytes):
+    """Put the map's embedded files (the BSP pakfile lump: per-map material copies, cubemaps,
+    custom textures) in front of the game's search path, as the engine does."""
+    import io
+    import zipfile
+    from srctools.filesys import FileSystemChain, ZipFileSystem
+    from .lights import bsp_lump
+    try:
+        data, _ = bsp_lump(bsp_bytes, 40)
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except Exception:
+        return fsys
+    out = FileSystemChain()
+    out.add_sys(ZipFileSystem("<bsp pakfile>", zf))
+    for fs, prefix in fsys.systems:
+        out.add_sys(fs, prefix)
+    return out
+
+
+def _mount_dir_vpks(chain):
+    """The engine also mounts pak01_dir.vpk inside every plain-folder "Game" path; Portal 2's
+    gameinfo lists only "|gameinfo_path|." and relies on that. Loose files keep priority."""
+    import os
+    from srctools.filesys import FileSystemChain, RawFileSystem, VPKFileSystem
+    mounted = {os.path.normcase(os.path.abspath(fs.path)) for fs, _ in chain.systems
+               if isinstance(fs, VPKFileSystem)}
+    out = FileSystemChain()
+    for fs, prefix in chain.systems:
+        out.add_sys(fs, prefix)
+        if isinstance(fs, RawFileSystem):
+            vpk = os.path.join(fs.path, "pak01_dir.vpk")
+            if os.path.isfile(vpk) and os.path.normcase(os.path.abspath(vpk)) not in mounted:
+                out.add_sys(VPKFileSystem(vpk))
+                mounted.add(os.path.normcase(os.path.abspath(vpk)))
+    return out
 
 
 def _search_paths_filesystem(game_dir: str):
@@ -105,9 +143,16 @@ class MaterialInfo:
         return self.params.get("$selfillum") == "1"
 
     @property
+    def liquid(self) -> bool:
+        return self.shader.lower() == "water"
+
+    @property
     def refract_tint(self) -> list[int] | None:
         """For Refract-shader glass (no base texture; Source draws the scene behind it, tinted
-        and distorted): the tint as 0-255 RGB. None for any other shader."""
+        and distorted): the tint as 0-255 RGB. Water: its fog colour. None for other shaders."""
+        if self.liquid:
+            nums = [float(x) for x in re.findall(r"[-\d.]+", self.params.get("$fogcolor", "{ 60 80 90 }"))[:3]]
+            return [int(round(min(255, max(0, c)))) for c in nums] if len(nums) == 3 else [60, 80, 90]
         if self.shader.lower() != "refract":
             return None
         nums = [float(x) for x in re.findall(r"[-\d.]+", self.params.get("$refracttint", "1 1 1"))[:3]]

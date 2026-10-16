@@ -30,24 +30,50 @@ _VTF_FMT = {0: ("px", 4), 1: ("px", 4), 2: ("px", 3), 3: ("px", 3), 4: ("px", 2)
             15: ("blk", 16), 16: ("px", 4), 20: ("blk", 8), 24: ("px", 8), 25: ("px", 8)}
 
 
-def vtf_mip0(data: bytes) -> bytes | None:
-    """Raw pixel data of the largest mip, first frame. VTF stores mips smallest first, so the
-    largest is at the end of the file."""
+def vtf_mip(data: bytes, level: int = 0) -> bytes | None:
+    """Raw pixel data of one mip level (0 = largest), first frame. VTF stores mips smallest
+    first, so the largest is at the end of the file."""
     w, h = struct.unpack_from("<HH", data, 16)
     frames = struct.unpack_from("<H", data, 24)[0]
     fmt = struct.unpack_from("<i", data, 52)[0]
-    if fmt not in _VTF_FMT:
+    mips = data[56]
+    if fmt not in _VTF_FMT or level >= mips:
         return None
     kind, b = _VTF_FMT[fmt]
-    size = w * h * b if kind == "px" else max(1, (w + 3) // 4) * max(1, (h + 3) // 4) * b
-    start = len(data) - size * frames
-    return data[start:start + size]
+
+    def size(l):
+        mw, mh = max(1, w >> l), max(1, h >> l)
+        return mw * mh * b if kind == "px" else max(1, (mw + 3) // 4) * max(1, (mh + 3) // 4) * b
+    end = len(data)
+    for l in range(level):
+        end -= size(l) * frames
+    start = end - size(level) * frames
+    return data[start:start + size(level)]
+
+
+def vtf_mip0(data: bytes) -> bytes | None:
+    return vtf_mip(data, 0)
+
+
+def remix_hashes(vtf_bytes: bytes) -> list[str]:
+    """Candidate Remix texture hashes, most likely first. Portal RTX (2022) keys textures by
+    XXH64 (seed 0) of mip 0; newer Remix builds (Portal 2 RTX) by XXH3-64 of mip 0, or of mip 1
+    for textures the game uploads a level down (measured: 79 + 7 of sp_a1_intro3's textures)."""
+    import xxhash
+    out = []
+    for level in (0, 1):
+        m = vtf_mip(vtf_bytes, level)
+        if m is None:
+            continue
+        if level == 0:
+            out.append(xxhash.xxh64_hexdigest(m).upper())
+        out.append(xxhash.xxh3_64_hexdigest(m).upper())
+    return out
 
 
 def remix_hash(vtf_bytes: bytes) -> str | None:
-    import xxhash
-    m = vtf_mip0(vtf_bytes)
-    return None if m is None else xxhash.xxh64_hexdigest(m).upper()
+    h = remix_hashes(vtf_bytes)
+    return h[0] if h else None
 
 
 def _block_end(text: str, open_brace: int) -> int:
@@ -102,9 +128,10 @@ def match_materials(fsys, materials, replacements) -> dict[str, dict]:
         if not bt:
             continue
         data = _read(fsys, "materials/" + bt.lower().replace("\\", "/") + ".vtf")
-        h = remix_hash(data) if data else None
-        if h in replacements and replacements[h]:
-            out[m] = {"hash": h, **replacements[h]}
+        for h in (remix_hashes(data) if data else []):
+            if h in replacements and replacements[h]:
+                out[m] = {"hash": h, **replacements[h]}
+                break
     return out
 
 
@@ -235,3 +262,63 @@ def gray_map(img: Image.Image, max_size: int = 256, flat_range: int = 6):
 
 def norm(name: str) -> str:
     return name.replace("\\", "/").lstrip("./").lower()
+
+
+# ------------------------------------------------------------------ loose DDS files (Remix mods)
+
+# DDS FourCC (pre-DX10 header) -> DXGI format
+_FOURCC_DXGI = {b"DXT1": 71, b"DXT3": 74, b"DXT5": 77, b"ATI1": 80, b"BC4U": 80, b"ATI2": 83, b"BC5U": 83}
+_DXGI_BLOCK = {71: 8, 72: 8, 74: 16, 75: 16, 77: 16, 78: 16, 80: 8, 81: 8, 83: 16, 84: 16,
+               95: 16, 96: 16, 98: 16, 99: 16}
+
+
+def read_dds(path: str, max_size: int = 512) -> RtxTexture:
+    """One mip of a DDS file (the largest no bigger than max_size), as RGBA. Remix mods that
+    ship their textures as loose files (Portal 2 RTX mods) use BC7 / BC5 / BC4 with DX10
+    headers; old-style FourCC and uncompressed files work too."""
+    with open(path, "rb") as fh:
+        b = fh.read()
+    if b[:4] != b"DDS ":
+        raise ValueError(f"{path}: not a DDS file")
+    h, w = struct.unpack_from("<II", b, 12)
+    mips = max(1, struct.unpack_from("<I", b, 28)[0])
+    fourcc = b[84:88]
+    if fourcc == b"DX10":
+        dxgi, off = struct.unpack_from("<I", b, 128)[0], 148
+    else:
+        dxgi, off = _FOURCC_DXGI.get(fourcc), 128
+    name = os.path.basename(path)
+    if dxgi not in _DXGI_BLOCK:                    # uncompressed or unusual: let Pillow read it
+        img = Image.open(io.BytesIO(b)).convert("RGBA")
+        if max(img.size) > max_size:
+            k = max_size / max(img.size)
+            img = img.resize((max(1, round(img.width * k)), max(1, round(img.height * k))), Image.Resampling.BOX)
+        return RtxTexture(name, img, (w, h))
+    bs = _DXGI_BLOCK[dxgi]
+    level = 0
+    while level < mips - 1 and max(w >> level, h >> level) > max_size:
+        off += _bc_size(max(1, w >> level), max(1, h >> level), bs)
+        level += 1
+    lw, lh = max(1, w >> level), max(1, h >> level)
+    img = _dds(dxgi, lw, lh, b[off:off + _bc_size(lw, lh, bs)])
+    img.load()
+    return RtxTexture(name, img.convert("RGBA"), (w, h))
+
+
+def read_remix_dir(mod_dir: str, names, max_size: int = 512) -> dict[str, RtxTexture]:
+    """{norm(name): texture} for the given usda texture paths, read from a Remix mod folder.
+    Matching ignores case (the usda was written on Windows)."""
+    index = {}
+    for root, _, files in os.walk(mod_dir):
+        for f in files:
+            full = os.path.join(root, f)
+            index[norm(os.path.relpath(full, mod_dir))] = full
+    out = {}
+    for n in names:
+        p = index.get(norm(n))
+        if p is not None:
+            try:
+                out[norm(n)] = read_dds(p, max_size)
+            except Exception:                        # pragma: no cover - a broken file loses one map
+                pass
+    return out

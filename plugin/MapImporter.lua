@@ -18,7 +18,7 @@ export type Options = {
 	parent: Instance?,          -- default: workspace.Map
 	moveSpawn: boolean?,        -- move/hide the first SpawnLocation onto info_player_start (default true)
 	texlightsAsNeon: boolean?,  -- light-emitting materials become Neon in their light colour (default true)
-	indoorLighting: boolean?,   -- set up Lighting for an enclosed map: no sun or sky light, dim ambient (default true)
+	indoorLighting: boolean?,   -- set up Lighting (default true): the map's sun if it has one, else no sun or sky light, dim ambient
 	matte: boolean?,            -- give textures a flat full-roughness map so they don't read as glossy (default true)
 	glassTransparency: number?, -- Transparency of Refract-shader glass such as observation windows (default 0.75)
 	onProgress: ((string) -> ())?,
@@ -284,6 +284,48 @@ function MapImporter.setupIndoorLighting()
 	return true
 end
 
+-- Maps with a light_environment (sunlight through windows or broken roofs): Roblox's sun
+-- takes Source's direction, colour and strength; OutdoorAmbient (which Roblox applies only
+-- where the sky is visible, like Source's sky ambient) takes the sky ambient; indoor ambient
+-- stays dim and the sky-probe lighting stays off so it doesn't leak into closed rooms.
+-- Roblox derives the sun direction from ClockTime and GeographicLatitude, so those are found
+-- by search against Lighting:GetSunDirection() (no formula to get wrong).
+local SUN_BRIGHTNESS_PER_INTENSITY = 8      -- set by eye
+local SKY_AMBIENT_SCALE = 0.35
+
+function MapImporter.setupSunLighting(sun)
+	local L = game:GetService("Lighting")
+	local want = Vector3.new(sun.direction[1], sun.direction[2], sun.direction[3]).Unit
+	local best, bt, bl = -2, L.ClockTime, L.GeographicLatitude
+	local function try(t: number, lat: number)
+		L.ClockTime, L.GeographicLatitude = t % 24, math.clamp(lat, -90, 90)
+		local d = L:GetSunDirection():Dot(want)
+		if d > best then best, bt, bl = d, t % 24, math.clamp(lat, -90, 90) end
+	end
+	for t = 0, 23.5, 0.5 do
+		for lat = -90, 90, 10 do try(t, lat) end
+	end
+	local st, sl = 0.25, 5
+	for _ = 1, 12 do
+		local ct, cl = bt, bl
+		for dt = -1, 1 do
+			for dl = -1, 1 do try(ct + dt * st, cl + dl * sl) end
+		end
+		st, sl = st / 2, sl / 2
+	end
+	L.ClockTime, L.GeographicLatitude = bt, bl
+	L.Brightness = math.clamp(sun.intensity * SUN_BRIGHTNESS_PER_INTENSITY, 0.5, 6)
+	L.ColorShift_Top = Color3.fromRGB(sun.color[1], sun.color[2], sun.color[3])
+	local a = math.clamp(sun.ambient * SKY_AMBIENT_SCALE, 0, 1)
+	local ac = sun.ambient_color
+	L.OutdoorAmbient = Color3.fromRGB(ac[1] * a, ac[2] * a, ac[3] * a)
+	L.Ambient = Color3.fromRGB(50, 52, 56)
+	L.EnvironmentDiffuseScale = 0
+	L.EnvironmentSpecularScale = 0
+	L.GlobalShadows = true
+	return math.deg(math.acos(math.clamp(best, -1, 1)))     -- remaining direction error, degrees
+end
+
 -- ------------------------------------------------------------------ build
 
 function MapImporter.build(contents: string, options: Options?)
@@ -326,10 +368,12 @@ function MapImporter.build(contents: string, options: Options?)
 		if not im then return nil end
 		local kind = if im.enc ~= "zstd" then "color" elseif im.ch == 2 then "normal" else "gray"
 		bottom = bottom == true and kind == "normal"
-		local key = name .. "|" .. tostring(swap) .. tostring(fx) .. tostring(fy) .. (if bottom then "|b" else "")
+		-- keyed by the image's data, so materials sharing one texture share its EditableImages
+		local id = tostring(im.off)
+		local key = id .. "|" .. tostring(swap) .. tostring(fx) .. tostring(fy) .. (if bottom then "|b" else "")
 		if variants[key] == nil then
-			bases[name] = bases[name] or decodeImage(data, blob0, im)
-			variants[key] = orient(bases[name], im.w, im.h, swap, fx, fy, kind, bottom) or false
+			bases[id] = bases[id] or decodeImage(data, blob0, im)
+			variants[key] = orient(bases[id], im.w, im.h, swap, fx, fy, kind, bottom) or false
 		end
 		return variants[key] or nil
 	end
@@ -393,10 +437,12 @@ function MapImporter.build(contents: string, options: Options?)
 			end
 			if m and m.glass then
 				-- Refract glass (observation windows): Source draws the room behind it, tinted.
-				-- See-through in the tint colour, and no shadow so lights shine through.
+				-- See-through in the tint colour, and no shadow so lights shine through. Water
+				-- (tinted by its fog colour) is murkier, and you fall into it.
 				p.Color = Color3.fromRGB(m.glass[1], m.glass[2], m.glass[3])
-				p.Transparency = opts.glassTransparency or 0.75
+				p.Transparency = if m.liquid then 0.3 else (opts.glassTransparency or 0.75)
 				p.CastShadow = false
+				if m.liquid then p.CanCollide, p.CanQuery = false, false end
 			end
 			target = folder(folderName(rec))
 			if rec.piece > 0 then
@@ -606,8 +652,11 @@ function MapImporter.build(contents: string, options: Options?)
 		model:SetAttribute("SourceKind", rec.kind)
 		local cf = CFrame.new(rec.c[1], rec.c[2], rec.c[3])
 		byBrush[rec.id] = byBrush[rec.id] or {}
+		-- displacements aren't convex: precise decomposition; convex brushes: one exact hull
+		local fidelity = if rec.fidelity == "precise" then Enum.CollisionFidelity.PreciseConvexDecomposition
+			else Enum.CollisionFidelity.Hull
 		for k, sm in ipairs(rec.meshes) do
-			local mp = meshPart(sm, rec.collider == nil, Enum.CollisionFidelity.Hull)
+			local mp = meshPart(sm, rec.collider == nil, fidelity)
 			if mp then
 				mp.Name = "mesh_" .. k
 				mp.CFrame = cf
@@ -620,8 +669,9 @@ function MapImporter.build(contents: string, options: Options?)
 					mp.Material = Enum.Material.Neon
 				elseif m and m.glass then
 					mp.Color = Color3.fromRGB(m.glass[1], m.glass[2], m.glass[3])
-					mp.Transparency = opts.glassTransparency or 0.75
+					mp.Transparency = if m.liquid then 0.3 else (opts.glassTransparency or 0.75)
 					mp.CastShadow = false
+					if m.liquid then mp.CanCollide, mp.CanQuery = false, false end
 				end
 				mp.Parent = model
 				table.insert(byBrush[rec.id], mp)
@@ -651,7 +701,12 @@ function MapImporter.build(contents: string, options: Options?)
 	root.Parent = parent
 
 	if opts.indoorLighting ~= false then
-		MapImporter.setupIndoorLighting()
+		if meta.lights.sun then
+			local err = MapImporter.setupSunLighting(meta.lights.sun)
+			progress(string.format("sun set up (direction within %.2f degrees)", err))
+		else
+			MapImporter.setupIndoorLighting()
+		end
 	end
 
 	if meta.spawn and opts.moveSpawn ~= false then

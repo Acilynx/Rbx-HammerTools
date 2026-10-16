@@ -17,8 +17,9 @@ def main(argv=None) -> int:
     b.add_argument("--region", nargs=6, type=float, metavar=("MINX", "MINY", "MINZ", "MAXX", "MAXY", "MAXZ"),
                    help="only brushes touching this box (Source units)")
     b.add_argument("--no-verify", action="store_true", help="skip the per-brush decomposition self-check")
-    b.add_argument("--rtx-usda", help="Portal RTX's portal_rtx_replacements.usda (with --rtxb: PBR maps)")
-    b.add_argument("--rtxb", help="textures pulled by tools/rtx_extract.py")
+    b.add_argument("--rtx-usda", help="a Remix mod's replacement layer (.usda): PBR maps for the materials it "
+                   "replaces. Its textures come from --rtxb, or else from loose .dds files next to it")
+    b.add_argument("--rtxb", help="Portal RTX textures pulled by tools/rtx_extract.py")
     b.add_argument("--no-props", action="store_true", help="leave out prop_static/dynamic/physics models")
     b.add_argument("-o", "--out", required=True)
     b.add_argument("--report", help="also write the build report as JSON")

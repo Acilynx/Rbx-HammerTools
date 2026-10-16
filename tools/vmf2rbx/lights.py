@@ -60,19 +60,43 @@ class WorldLight:
     flags: int = 0
 
 
+def bsp_lump(bsp_bytes: bytes, i: int) -> tuple[bytes, int]:
+    """(data, lump version) of lump i. Later BSPs (Portal 2, CS:GO) may LZMA-compress a lump:
+    it then starts with "LZMA", u32 uncompressed size, u32 compressed size, 5 property bytes."""
+    o, ln, ver, _ = struct.unpack_from("<iii4s", bsp_bytes, 8 + 16 * i)
+    data = bsp_bytes[o:o + ln]
+    if data[:4] == b"LZMA":
+        import lzma
+        size, csize = struct.unpack_from("<II", data, 4)
+        props = data[12:17]
+        d = props[0]
+        lc, lp, pb = d % 9, (d // 9) % 5, d // 45
+        dict_size = struct.unpack_from("<I", props, 1)[0]
+        filt = [{"id": lzma.FILTER_LZMA1, "lc": lc, "lp": lp, "pb": pb, "dict_size": dict_size}]
+        data = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=filt).decompress(data[17:17 + csize], size)
+    return data, ver
+
+
 def read_world_lights(bsp_bytes: bytes) -> list[WorldLight]:
-    def lump(i):
-        o, ln, _, _ = struct.unpack_from("<iii4s", bsp_bytes, 8 + 16 * i)
-        return bsp_bytes[o:o + ln]
-    data = lump(LUMP_WORLDLIGHTS_HDR) or lump(LUMP_WORLDLIGHTS)
-    size = 88 if len(data) % 88 == 0 else 84
-    fmt = "<3f3f3fiiifffffff" + ("iii" if size == 88 else "ii")
+    """dworldlight_t records. Lump version 0 (Portal, HL2): 88 bytes (84 in old BSPs without
+    flags/texinfo/owner... the last int). Version 1 (Portal 2, CS:GO): 100 bytes, with a
+    shadow_cast_offset vector after the normal."""
+    data, ver = bsp_lump(bsp_bytes, LUMP_WORLDLIGHTS_HDR)
+    if not data:
+        data, ver = bsp_lump(bsp_bytes, LUMP_WORLDLIGHTS)
+    if ver >= 1:
+        size, fmt = 100, "<3f3f3f3fiiifffffffiii"
+    else:
+        size = 88 if len(data) % 88 == 0 else 84
+        fmt = "<3f3f3fiiifffffff" + ("iii" if size == 88 else "ii")
     out = []
     for i in range(len(data) // size):
         f = struct.unpack_from(fmt, data, size * i)
+        if ver >= 1:
+            f = f[:9] + f[12:]                     # drop shadow_cast_offset
         typ = EMIT[f[10]] if f[10] < len(EMIT) else str(f[10])
         out.append(WorldLight(np.array(f[0:3]), np.array(f[3:6]), np.array(f[6:9]), typ, f[11],
-                              f[12], f[13], f[14], f[15], tuple(f[16:19]), f[19] if size == 88 else 0))
+                              f[12], f[13], f[14], f[15], tuple(f[16:19]), f[19] if size >= 88 else 0))
     return out
 
 
@@ -162,6 +186,7 @@ class LightReport:
     points: list = field(default_factory=list)          # point and spot lights
     unmatched_patches: int = 0
     dark_lights: int = 0                                # point/spot lights too dim (or negative) to use
+    sun: dict | None = None                             # light_environment: direction toward the sun etc.
 
 
 def fade_distance(attn, lum: float, cutoff: float) -> float | None:
@@ -230,6 +255,16 @@ def build_lights(world_lights: list[WorldLight], brushes: list[Brush], tuning=Li
                                 color=[round(255 * c) for c in tl["color"]],
                                 brightness=tuning.surface_brightness_per_radiance * float(np.mean(tl["radiance"])),
                                 range=rng))
+    sky = {wl.type: wl for wl in world_lights if wl.type in ("skylight", "skyambient")}
+    if "skylight" in sky:
+        wl = sky["skylight"]
+        I = wl.intensity
+        amb = sky["skyambient"].intensity if "skyambient" in sky else np.zeros(3)
+        rep.sun = dict(direction=to_roblox(-wl.normal).tolist(),          # toward the sun
+                       color=_tint(I / max(I.max(), 1e-9), tuning.saturation),
+                       intensity=float(I.mean()),
+                       ambient_color=_tint(amb / max(amb.max(), 1e-9), tuning.saturation),
+                       ambient=float(amb.mean()))
     for wl in world_lights:
         if wl.type not in ("point", "spot"):
             continue

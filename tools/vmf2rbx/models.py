@@ -218,13 +218,31 @@ def parse_vvd(vvd: bytes) -> np.ndarray:
     return np.concatenate(parts)
 
 
-def parse_vtx(vtx: bytes):
-    """LOD 0 triangles: [bodypart][model][mesh] -> (orig_vertex_ids (k,), triangles (m, 3))."""
+# VTX strip group / strip record sizes. Models from MDL v49 on (Portal 2, CS:GO) add
+# numTopologyIndices + topologyOffset to both (+8 bytes each). The strip size is confirmed on
+# Portal 2 data (the old size misreads meshes with several strips); the strip group size follows
+# the same change in the engine headers.
+VTX_LAYOUTS = {"old": (25, 27), "v49": (33, 35)}
+
+
+def parse_vtx(vtx: bytes, mdl_version: int = 44):
+    """LOD 0 triangles: [bodypart][model][mesh] -> (orig_vertex_ids (k,), triangles (m, 3)).
+    Picks the record layout by model version, and falls back to the other one if the data
+    doesn't check out (an index outside its strip group's vertices)."""
+    first = "v49" if mdl_version >= 49 else "old"
+    for name in (first, "old" if first == "v49" else "v49"):
+        try:
+            return _parse_vtx(vtx, *VTX_LAYOUTS[name])
+        except (ValueError, struct.error, IndexError):
+            continue
+    raise ValueError("VTX layout not recognised")
+
+
+def _parse_vtx(vtx: bytes, sg_size: int, st_size: int):
     version, = struct.unpack_from("<i", vtx, 0)
     if version != 7:
         raise ValueError(f"unsupported VTX version {version}")
     nbp, bp_off = struct.unpack_from("<2i", vtx, 28)
-    sg_size = 25
     out = []
     for b in range(nbp):
         bo = bp_off + 8 * b
@@ -247,9 +265,13 @@ def parse_vtx(vtx: bytes):
                     orig = np.array([struct.unpack_from("<H", vtx, so + v_off + 9 * i + 4)[0] for i in range(nv)],
                                     dtype=np.int64)
                     idx = np.frombuffer(vtx, "<u2", count=ni, offset=so + i_off).astype(np.int64)
+                    if ni and idx.max() >= nv:
+                        raise ValueError("index outside the strip group")
                     for s in range(ns):
-                        st = so + s_off + 27 * s
+                        st = so + s_off + st_size * s
                         sni, si_off, _, _, _, flags = struct.unpack_from("<4ihB", vtx, st)
+                        if si_off < 0 or si_off + sni > ni:
+                            raise ValueError("strip outside the strip group")
                         seg = idx[si_off:si_off + sni]
                         if flags & 2:                       # triangle strip
                             t = [(seg[i], seg[i + 1], seg[i + 2]) if i % 2 == 0 else (seg[i + 1], seg[i], seg[i + 2])
@@ -272,7 +294,7 @@ def load_model(mdl: bytes, vvd: bytes, vtx: bytes, name: str = "", body: int = 0
     body part."""
     info = parse_mdl(mdl)
     verts = parse_vvd(vvd).copy()
-    strips = parse_vtx(vtx)
+    strips = parse_vtx(vtx, info["version"])
     skin = rest_pose(mdl)
     if skin:
         P = np.zeros((len(verts), 3)); N = np.zeros((len(verts), 3))

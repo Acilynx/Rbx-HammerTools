@@ -207,8 +207,10 @@ def decompose_prism(brush: Brush):
 
 
 def brush_to_parts(brush: Brush) -> list[PartSpec]:
-    kind = classify(brush)
     R = to_roblox(brush.verts) * SPU
+    if brush.disp_sides:
+        return [PartSpec("Mesh", (R.min(0) + R.max(0)) / 2, R.max(0) - R.min(0), np.eye(3), 0, "displacement")]
+    kind = classify(brush)
     if kind == "box_axis":
         return [PartSpec("Part", (R.min(0) + R.max(0)) / 2, R.max(0) - R.min(0), np.eye(3), 0, kind)]
     if kind == "box_rotated":

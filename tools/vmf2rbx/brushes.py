@@ -21,6 +21,23 @@ class TexAxis:
 
 
 @dataclass
+class Displacement:
+    """A side's dispinfo: a (2^power + 1)^2 grid over the (4-sided) face. Arrays are indexed
+    [row * size + column], rows as in the VMF ("row0", "row1", ...)."""
+    power: int
+    start: np.ndarray         # startposition: the face corner the grid starts at
+    elevation: float
+    normals: np.ndarray       # (N, 3) displacement direction per vertex
+    distances: np.ndarray     # (N,)
+    offsets: np.ndarray       # (N, 3)
+    alphas: np.ndarray        # (N,) blend between $basetexture (0) and $basetexture2 (255)
+
+    @property
+    def size(self) -> int:
+        return (1 << self.power) + 1
+
+
+@dataclass
 class Side:
     normal: np.ndarray        # outward unit normal
     dist: float               # plane: normal . x = dist
@@ -28,6 +45,7 @@ class Side:
     u: TexAxis
     v: TexAxis
     point: np.ndarray         # a point on the plane
+    disp: "Displacement | None" = None
 
     @property
     def is_tool(self) -> bool:
@@ -49,6 +67,10 @@ class Brush:
     @property
     def is_tool_only(self) -> bool:
         return not self.visible_sides
+
+    @property
+    def disp_sides(self) -> list[Side]:
+        return [s for s in self.sides if s.disp is not None]
 
     @property
     def bounds(self) -> tuple[np.ndarray, np.ndarray]:
@@ -92,6 +114,17 @@ def make_brush(id: int, planes: list[tuple], owner="world", entity_name="") -> B
     return b
 
 
+def _displacement(side) -> Displacement | None:
+    if not getattr(side, "is_disp", False) or not side._disp_verts:
+        return None
+    vs = side._disp_verts
+    vec = lambda v: [v.x, v.y, v.z]
+    return Displacement(
+        int(side.disp_power), np.array(vec(side.disp_pos), float), float(side.disp_elevation),
+        np.array([vec(d.normal) for d in vs], float), np.array([d.distance for d in vs], float),
+        np.array([vec(d.offset) for d in vs], float), np.array([d.alpha for d in vs], float))
+
+
 def from_srctools(solid, owner="world", entity_name="") -> Brush | None:
     """Convert a srctools Solid. Hammer stores each plane as three points; the winding gives
     the normal. Rather than trusting one winding convention, try it and flip if the brush
@@ -106,9 +139,9 @@ def from_srctools(solid, owner="world", entity_name="") -> Brush | None:
         n /= ln
         u = TexAxis(np.array([s.uaxis.x, s.uaxis.y, s.uaxis.z], float), float(s.uaxis.offset), float(s.uaxis.scale))
         v = TexAxis(np.array([s.vaxis.x, s.vaxis.y, s.vaxis.z], float), float(s.vaxis.offset), float(s.vaxis.scale))
-        raw.append([n, float(n @ p[0]), s.mat.lower(), u, v, p[0]])
+        raw.append([n, float(n @ p[0]), s.mat.lower(), u, v, p[0], _displacement(s)])
     for flip in (1.0, -1.0):
-        sides = [Side(flip * n, flip * d, m, u, v, p0) for n, d, m, u, v, p0 in raw]
+        sides = [Side(flip * n, flip * d, m, u, v, p0, dp) for n, d, m, u, v, p0, dp in raw]
         verts = solve_vertices(sides)
         if len(verts) >= 4:
             c = verts.mean(0)

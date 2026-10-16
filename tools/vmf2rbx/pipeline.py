@@ -21,7 +21,8 @@ class BuildOptions:
     lights: bool = True
     verify: bool = True                # volume + point test every decomposed brush
     texlights_as_neon: bool = True     # texture-light faces: Neon + light colour instead of an image
-    bake_faces: bool = True            # faces at odd texture angles get their own baked image
+    angled_as_mesh: bool = True        # brushes with faces at odd texture angles become meshes (exact UVs)
+    bake_faces: bool = True            # otherwise such faces get their own baked image
     rtx_usda: str | None = None        # Portal RTX replacement layer (portal_rtx_replacements.usda)
     rtxb: str | None = None            # textures pulled by tools/rtx_extract.py
     rtx_albedo: bool = True            # use the RTX albedo instead of the original texture
@@ -83,6 +84,9 @@ def verify_decomposition(b: Brush, parts: list[PartSpec], rng, samples=2000, war
 
 def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = BuildOptions()) -> BuildResult:
     say = opts.progress or (lambda msg: None)
+    if fsys is not None and bsp_bytes:
+        from .assets import with_bsp_pakfile
+        fsys = with_bsp_pakfile(fsys, bsp_bytes)
     say("reading brushes")
     brushes = load_vmf_brushes(vmf)
     if opts.region:
@@ -139,11 +143,17 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             images[m] = img
             avg_colors[m] = [int(round(c)) for c in np.asarray(img.convert("RGB"), float).reshape(-1, 3).mean(0)]
 
-    if opts.rtx_usda and opts.rtxb:
-        say("Portal RTX materials")
+    # Remix textures: packed into an .rtxb by tools/rtx_extract.py (Portal RTX's .pkg archives),
+    # or loose DDS files in the mod folder next to the .usda (Portal 2 RTX mods)
+    rtx_dir = None
+    if opts.rtx_usda and not opts.rtxb:
+        import os
+        rtx_dir = os.path.dirname(os.path.abspath(opts.rtx_usda))
+    if opts.rtx_usda:
+        say("Remix materials")
     # --- Portal RTX replacements: PBR maps (and albedo) for the materials it covers
     pbr, pbr_const = {}, {}
-    if opts.rtxb and opts.rtx_usda and fsys is not None and images:
+    if (opts.rtxb or rtx_dir) and opts.rtx_usda and fsys is not None and images:
         from . import rtx
         with open(opts.rtx_usda, encoding="utf-8", errors="replace") as fh:
             reps = rtx.parse_replacements(fh.read())
@@ -162,7 +172,12 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             if not any(h in p.upper() for p in paths):
                 del matched[m]
                 rep["prop materials skipped: RTX remodel textures"] += 1
-        texs = rtx.read_rtxb(opts.rtxb)
+        if opts.rtxb:
+            texs = rtx.read_rtxb(opts.rtxb)
+        else:
+            texs = rtx.read_remix_dir(rtx_dir, {info[ch] for info in matched.values()
+                                                for ch in rtx.CHANNELS if ch in info})
+            rep["Remix textures read"] += len(texs)
         for m, info in matched.items():
             def get(ch):
                 return texs.get(rtx.norm(info[ch])) if ch in info else None
@@ -238,20 +253,38 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     # --- textures per face
     parts_out = []
     baked = {}
-    from .brushmesh import brush_mesh_record
+    from .brushmesh import brush_mesh_record, displacement_record
     for b, parts in built:
+        probe = None
+        if parts[0].cls != "Mesh" and sizes and opts.angled_as_mesh:
+            # A face whose texture runs at an angle a Part's Texture can't express: the brush as
+            # a mesh maps it exactly, where baking costs one image per face (686 in sp_a1_intro3)
+            probe = [texture_part(b, p, sizes, None, None, pbr) for p in parts]
+            if any(why.startswith("texture not at 90") for _, sk in probe for why, _ in sk):
+                parts = [PartSpec("Mesh", parts[0].center, parts[0].size, np.eye(3), 0,
+                                  f"{parts[0].kind} (angled texture)")]
+                rep["brushes as meshes for angled textures"] += 1
         if parts[0].cls == "Mesh":
-            rec, mblobs = brush_mesh_record(b, sizes)
+            if parts[0].kind == "displacement":
+                rec, mblobs = displacement_record(b, sizes)
+                if rec is None:
+                    rep["displacement without a 4-sided face"] += 1
+                    continue
+                rep["displacements"] += len(rec["meshes"])
+            else:
+                rec, mblobs = brush_mesh_record(b, sizes)
+                rec["s"] = [round(float(x), 6) for x in parts[0].size]
+                rep["brush meshes"] += 1
             prop_blobs.update(mblobs)
             parts_out.append(dict(id=b.id, piece=0, cls="Mesh", owner=b.owner, entity=b.entity_name,
-                                  mat=b.dominant_material(), kind=parts[0].kind, faces=[],
-                                  s=[round(float(x), 6) for x in parts[0].size], **rec))
-            rep["brush meshes"] += 1
+                                  mat=(b.disp_sides[0].material if b.disp_sides else b.dominant_material()),
+                                  kind=parts[0].kind, faces=[], **rec))
             continue
-        for p in parts:
+        for i, p in enumerate(parts):
             faces = []
             if sizes:
-                faces, skipped = texture_part(b, p, sizes, images, baked if opts.bake_faces else None, pbr)
+                faces, skipped = probe[i] if probe else texture_part(b, p, sizes, images,
+                                                                     baked if opts.bake_faces else None, pbr)
                 if opts.texlights_as_neon:
                     faces = [f for f in faces if f.material not in texlight_mats]
                 for why, m in skipped:
@@ -298,10 +331,12 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                            selfillum=mats[m].self_illum if m in mats else False,
                            color=avg_colors.get(m),          # fallback for faces left untextured
                            texlight=light_rep.texlights.get(m) if light_rep else None,
-                           glass=mats[m].refract_tint if m in mats else None,   # Refract glass: tint
+                           glass=mats[m].refract_tint if m in mats else None,   # Refract glass/water: tint
+                           liquid=mats[m].liquid if m in mats else False,       # water: see-through, no collision
                            pbr=pbr_const.get(m))     # flat roughness/metalness values, RTX hash
                    for m in used},
-        lights=dict(surface=light_rep.surface, points=light_rep.points) if light_rep else dict(surface=[], points=[]),
+        lights=dict(surface=light_rep.surface, points=light_rep.points, sun=light_rep.sun) if light_rep
+        else dict(surface=[], points=[], sun=None),
         models=prop_models,
         props=prop_instances,
     )

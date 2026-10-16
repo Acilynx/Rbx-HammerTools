@@ -97,3 +97,81 @@ def brush_mesh_record(b: Brush, sizes: dict):
         blobs[name] = blob
         collider = dict(blob=name, n=len(P), m=len(T))
     return dict(c=[round(float(x), 6) for x in centre], meshes=meshes, collider=collider), blobs
+
+
+# ------------------------------------------------------------------ displacements
+
+def disp_grid(b: Brush, s: Side):
+    """(base, displaced) vertex positions (N, 3), Source units, indexed [row * size + column].
+
+    As builddisp.cpp: the face's corners clockwise seen from outside, starting at the one at
+    startposition; row r runs from corner 0 toward corner 1, column c across to the edge
+    corner 3 -> corner 2. position = base + normal * distance + offset + face normal * elevation.
+    (Clockwise is checked on sp_a1_intro3: with it, sewn neighbours' edges coincide exactly.)"""
+    poly = face_polygon(b, s)[::-1]
+    if len(poly) != 4:
+        return None
+    k = int(np.argmin(np.linalg.norm(poly - s.disp.start, axis=1)))
+    p = np.roll(poly, -k, axis=0)
+    d = s.disp
+    n = d.size
+    t = np.linspace(0, 1, n)
+    e0 = p[0] + np.outer(t, p[1] - p[0])
+    e1 = p[3] + np.outer(t, p[2] - p[3])
+    base = (e0[:, None, :] + (e1 - e0)[:, None, :] * t[None, :, None]).reshape(-1, 3)
+    pos = base + d.normals * d.distances[:, None] + d.offsets + s.normal * d.elevation
+    return base, pos
+
+
+def disp_triangles(size: int) -> np.ndarray:
+    """Two triangles per grid quad, diagonals alternating as in builddisp.cpp."""
+    T = []
+    for y in range(size - 1):
+        for x in range(size - 1):
+            i = y * size + x
+            tl, tr, bl, br = i, i + 1, i + size, i + size + 1
+            if i % 2 == 1:
+                T += [(tl, bl, tr), (tr, bl, br)]
+            else:
+                T += [(tl, bl, br), (tl, br, tr)]
+    return np.array(T)
+
+
+def displacement_record(b: Brush, sizes: dict):
+    """A brush with displacements: only the displaced surfaces exist (VBSP drops the brush's
+    other faces). One mesh per displacement, smooth normals, Hammer UVs from the undisplaced
+    surface (as Source does); it collides itself (precise, since it isn't convex)."""
+    R = to_roblox(b.verts) * SPU
+    meshes, blobs, pts = [], {}, []
+    for s in b.disp_sides:
+        g = disp_grid(b, s)
+        if g is None:
+            continue
+        base, pos = g
+        T = disp_triangles(s.disp.size)
+        # counter-clockwise from outside: judge on the flat base surface
+        a, c, e = base[T[:, 0]], base[T[:, 1]], base[T[:, 2]]
+        flip = np.cross(c - a, e - a) @ s.normal < 0
+        T[flip] = T[flip][:, ::-1]
+        P = to_roblox(pos) * SPU
+        fn = np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]])
+        N = np.zeros_like(P)
+        for k in range(3):
+            np.add.at(N, T[:, k], fn)
+        N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-9)
+        U = face_uv(s, base, sizes.get(s.material, DEFAULT_TEX))
+        meshes.append((s.material, P, N, U, T))
+        pts.append(P)
+    if not meshes:
+        return None, {}
+    allp = np.concatenate(pts)
+    centre = (allp.min(0) + allp.max(0)) / 2
+    out = []
+    for mat, P, N, U, T in meshes:
+        blob = mesh_blob(P - centre, N, U, T)
+        name = _blob_name("dispmesh", blob)
+        blobs[name] = blob
+        out.append(dict(blob=name, material=mat, n=len(P), m=len(T)))
+    size = allp.max(0) - allp.min(0)
+    return dict(c=[round(float(x), 6) for x in centre], s=[round(float(x), 6) for x in size],
+                meshes=out, collider=None, fidelity="precise"), blobs

@@ -54,7 +54,15 @@ def write_package(path: str, meta: dict, images: dict[str, Image.Image], blobs: 
     blob = bytearray()
     mats = []
     zc = None
+    seen: dict[bytes, dict] = {}      # identical images (two materials, one texture) stored once
     for name, img in images.items():
+        import hashlib
+        import numpy as np
+        raw = np.ascontiguousarray(np.asarray(img.convert("RGBA")) if isinstance(img, Image.Image) else img)
+        key = hashlib.sha1(raw.tobytes() + str(raw.shape).encode()).digest()
+        if key in seen:
+            mats.append(dict(seen[key], name=name))
+            continue
         if isinstance(img, Image.Image):
             import numpy as np
             import zstandard
@@ -78,6 +86,7 @@ def write_package(path: str, meta: dict, images: dict[str, Image.Image], blobs: 
             data = zc.compress(a.tobytes())
             mats.append(dict(name=name, enc="zstd", w=a.shape[1], h=a.shape[0], ch=a.shape[2], off=len(blob), len=len(data)))
         blob += data
+        seen[key] = mats[-1]
     blob_meta = []
     for name, raw in (blobs or {}).items():
         import zstandard
