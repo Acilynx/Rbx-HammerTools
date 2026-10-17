@@ -59,3 +59,69 @@ def test_overlay_texels(kv):
     # the part sits just off the surface, on the normal side
     N = np.array([float(x) for x in kv["BasisNormal"].split()])
     assert 0 < (point_to_source(part.center) - O) @ N < 1.0
+
+
+# ------------------------------------------------------------------ projected overlay meshes
+
+from vmf2rbx.coords import SPU
+
+W, H = 128, 64
+
+def _box_with_ids():
+    from helpers import box
+    b = box(1, (0, 0, 0), (128, 128, 64))
+    for k, s in enumerate(b.sides, 1):
+        s.sid = 100 + k
+    return b
+
+
+def _side(b, n):
+    return next(s for s in b.sides if np.allclose(s.normal, n))
+
+
+def _mesh_points(rec, blobs):
+    m = rec["meshes"][0]
+    a = np.frombuffer(blobs[m["blob"]][: 12 * m["n"]], "<f4").reshape(-1, 3)[:-6] + rec["c"]
+    uv = np.frombuffer(blobs[m["blob"]][24 * m["n"]: 32 * m["n"]], "<f4").reshape(-1, 2)[:-6]
+    S = np.stack([a[:, 0], -a[:, 2], a[:, 1]], 1) / SPU           # back to Source units
+    return S, uv
+
+
+def test_overlay_mesh_on_one_face():
+    from vmf2rbx.overlays import LIFT, overlay_meshes
+    b = _box_with_ids()
+    top = _side(b, [0, 0, 1])
+    e = overlay(BasisOrigin="64 64 64", BasisU="1 0 0", BasisV="0 1 0", BasisNormal="0 0 1",
+                sides=str(top.sid), uv0="-16 -16 0", uv1="-16 16 0", uv2="16 16 0", uv3="16 -16 0")
+    out, rep = overlay_meshes(SimpleNamespace(entities=[e]), [b], {"signage/test": (W, H)})
+    assert rep["overlays"] == 1
+    rec, blobs = out[0]
+    S, uv = _mesh_points(rec, blobs)
+    assert np.allclose(S[:, 2], 64 + LIFT / SPU, atol=1e-3)            # on the face, lifted
+    assert np.allclose(np.sort(np.unique(S[:, 0].round(3))), [48, 80])  # clipped to the overlay
+    assert rec["nocollide"]
+
+
+def test_overlay_mesh_wraps_an_edge():
+    from vmf2rbx.overlays import overlay_meshes
+    b = _box_with_ids()
+    top, side = _side(b, [0, 0, 1]), _side(b, [1, 0, 0])
+    # centred on the top face's +x edge, half on the top, half hanging over the side
+    e = overlay(BasisOrigin="128 64 64", BasisU="1 0 0", BasisV="0 1 0", BasisNormal="0.7071 0 0.7071",
+                sides=f"{top.sid} {side.sid}", uv0="-16 -16 0", uv1="-16 16 0", uv2="16 16 0", uv3="16 -16 0")
+    out, rep = overlay_meshes(SimpleNamespace(entities=[e]), [b], {"signage/test": (W, H)})
+    assert rep["overlays wrapping an edge"] == 1
+    S, _ = _mesh_points(*out[0])
+    on_top = S[:, 2] > 64 + 0.05            # lifted off the top face
+    on_side = S[:, 0] > 128 + 0.05          # lifted off the side face
+    assert on_top.any() and on_side.any()
+    assert np.all(on_top | on_side)                                     # every piece hugs a face
+    assert S[on_top][:, 0].max() <= 128 + 1e-3 and S[on_side][:, 2].max() <= 64 + 1e-3
+
+
+def test_overlay_without_faces_is_dropped():
+    from vmf2rbx.overlays import overlay_meshes
+    b = _box_with_ids()
+    e = overlay(BasisOrigin="64 64 64", BasisU="1 0 0", BasisV="0 1 0", BasisNormal="0 0 1", sides="")
+    out, rep = overlay_meshes(SimpleNamespace(entities=[e]), [b], {"signage/test": (W, H)})
+    assert out == [] and rep["overlay on no faces (not drawn)"] == 1

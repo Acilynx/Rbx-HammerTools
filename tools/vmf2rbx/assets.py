@@ -147,6 +147,11 @@ class MaterialInfo:
         return self.shader.lower() == "water"
 
     @property
+    def alpha_blend(self) -> bool:
+        """Translucent or additive: the alpha blends. $alphatest alone is a cut-out."""
+        return self.params.get("$translucent") == "1" or self.additive
+
+    @property
     def nocull(self) -> bool:
         """$nocull: drawn from both sides (foliage cards)."""
         return self.params.get("$nocull") == "1"

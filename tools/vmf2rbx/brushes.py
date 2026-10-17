@@ -46,6 +46,7 @@ class Side:
     v: TexAxis
     point: np.ndarray         # a point on the plane
     disp: "Displacement | None" = None
+    sid: int = 0              # Hammer side id (info_overlay "sides" refer to it)
 
     @property
     def is_tool(self) -> bool:
@@ -139,9 +140,9 @@ def from_srctools(solid, owner="world", entity_name="") -> Brush | None:
         n /= ln
         u = TexAxis(np.array([s.uaxis.x, s.uaxis.y, s.uaxis.z], float), float(s.uaxis.offset), float(s.uaxis.scale))
         v = TexAxis(np.array([s.vaxis.x, s.vaxis.y, s.vaxis.z], float), float(s.vaxis.offset), float(s.vaxis.scale))
-        raw.append([n, float(n @ p[0]), s.mat.lower(), u, v, p[0], _displacement(s)])
+        raw.append([n, float(n @ p[0]), s.mat.lower(), u, v, p[0], _displacement(s), int(s.id)])
     for flip in (1.0, -1.0):
-        sides = [Side(flip * n, flip * d, m, u, v, p0, dp) for n, d, m, u, v, p0, dp in raw]
+        sides = [Side(flip * n, flip * d, m, u, v, p0, dp, sid) for n, d, m, u, v, p0, dp, sid in raw]
         verts = solve_vertices(sides)
         if len(verts) >= 4:
             c = verts.mean(0)

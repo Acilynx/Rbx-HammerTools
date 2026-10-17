@@ -443,7 +443,8 @@ function MapImporter.build(contents: string, options: Options?)
 				p.Transparency = if m.liquid then 0.3 elseif m.energy then 0.8 else (opts.glassTransparency or 0.75)
 				p.CastShadow = false
 				if m.liquid or m.energy then p.CanCollide, p.CanQuery = false, false end
-				if m.energy then p.Material = Enum.Material.Neon end
+				if m.energy then p.Material = Enum.Material.Neon
+				elseif not m.liquid then p.Material = Enum.Material.Glass end   -- Roblox's refraction
 			end
 			if rec.owner:sub(1, 8) == "trigger_" then
 				-- trigger volumes (fizzler fields etc.) don't block anything
@@ -614,8 +615,10 @@ function MapImporter.build(contents: string, options: Options?)
 							sa.AlphaMode = Enum.AlphaMode.Transparency
 							-- Measured in Studio: at Transparency 0 the alpha is only a cut-out (any
 							-- alpha > 0 draws solid, so fences work but glass is opaque). Any value
-							-- above 0 puts the part in the transparent pass, where alpha blends.
-							mp.Transparency = 0.02
+							-- above 0 puts the part in the transparent pass, where alpha blends; only
+							-- blended materials go there ($alphatest foliage stays a cut-out: it
+							-- shades better, and transparent-pass sorting hid it behind glass).
+							if mm.blend then mp.Transparency = 0.02 end
 							mp.CastShadow = false
 						end
 						if sa then sa.Parent = mp end
@@ -630,7 +633,8 @@ function MapImporter.build(contents: string, options: Options?)
 						mp.Transparency = if mm.liquid then 0.3 elseif mm.energy then 0.8 else (opts.glassTransparency or 0.75)
 						mp.CastShadow = false
 						if mm.liquid or mm.energy then mp.CanCollide, mp.CanQuery, mp.CanTouch = false, false, false end
-						if mm.energy then mp.Material = Enum.Material.Neon end
+						if mm.energy then mp.Material = Enum.Material.Neon
+						elseif not mm.liquid then mp.Material = Enum.Material.Glass end   -- Roblox's refraction
 					elseif mm and mm.texlight and opts.texlightsAsNeon ~= false then
 						mp.Material = Enum.Material.Neon
 					end
@@ -700,8 +704,9 @@ function MapImporter.build(contents: string, options: Options?)
 		local fidelity = if rec.fidelity == "precise" then Enum.CollisionFidelity.PreciseConvexDecomposition
 			else Enum.CollisionFidelity.Hull
 		for k, sm in ipairs(rec.meshes) do
-			local mp = meshPart(sm, rec.collider == nil, fidelity)
+			local mp = meshPart(sm, rec.collider == nil and not rec.nocollide, fidelity)
 			if mp then
+				if rec.nocollide then mp.CastShadow = false end     -- overlays: decals on surfaces
 				mp.Name = "mesh_" .. k
 				mp.CFrame = cf
 				mp:SetAttribute("SourceId", rec.id)

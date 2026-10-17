@@ -317,18 +317,13 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     say("overlays")
     # --- overlays: thin see-through parts in front of the surfaces they decorate
     if opts.overlays:
-        from .overlays import overlay_parts
-        ov, _, orep = overlay_parts(vmf, sizes, opts.region)
+        from .overlays import overlay_meshes
+        ov, orep = overlay_meshes(vmf, [b for b, _ in built], sizes, opts.region)
         for k, v in orep.items():
             rep[k] += v
-        for i, (p, ft, info) in enumerate(ov):
-            parts_out.append(dict(id=-(i + 1), piece=0, cls="Part", owner="info_overlay", entity=info["name"],
-                                  mat=info["material"], kind="overlay",
-                                  c=[round(float(x), 6) for x in p.center], s=[round(float(x), 6) for x in p.size],
-                                  r=[round(float(x), 6) for x in p.rot.flatten()],
-                                  faces=[[ft.face, ft.material, ft.swap, ft.flip_x, ft.flip_y,
-                                          round(ft.studs_per_tile_u, 6), round(ft.studs_per_tile_v, 6),
-                                          round(ft.offset_u, 6), round(ft.offset_v, 6)]] if ft else []))
+        for rec, oblobs in ov:
+            prop_blobs.update(oblobs)
+            parts_out.append(rec)
     mesh_mats = {m["material"] for pr in parts_out for m in pr.get("meshes", [])}
     face_imgs = {(f[9] if len(f) > 9 else f[1]) for pr in parts_out for f in pr["faces"]} | set(prop_mats) | mesh_mats
     images = {m: img for m, img in images.items() if m in face_imgs}
@@ -337,25 +332,22 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             images[f"{m}#{k}"] = arr                  # importer: <image key>#n / #r / #m
     images.update({k: img for k, img in baked.items() if k.split("#")[0] in face_imgs})
 
-    # shadow stand-ins for props, per model: from its collision hulls (.phy) when it has them,
-    # else from the enclosed volume of its opaque submeshes
+    # shadow stand-ins for props, per model, from the volume its opaque submeshes enclose: those
+    # boxes can't poke out of the model. (Not the .phy collision hulls: in sp_a1_intro3 they were
+    # often bigger than the model, covering doorways and showing through, and some came out
+    # rotated. prop_hulls stays available for collision.)
     model_shadows = {}
     for key, subs in prop_geom.items():
         opaque = [(P, T) for m, P, T in subs if casts_shadow(m)]
         if not opaque:
             continue
-        if key in prop_hulls:
-            boxes = shadow_mod.hull_boxes(prop_hulls[key])
-            src = "collision hulls"
-        else:
-            V, Ts, base = [], [], 0
-            for P, T in opaque:
-                V.append(P); Ts.append(T + base); base += len(P)
-            boxes = shadow_mod.mesh_boxes(np.concatenate(V), np.concatenate(Ts))
-            src = "enclosed volume"
+        V, Ts, base = [], [], 0
+        for P, T in opaque:
+            V.append(P); Ts.append(T + base); base += len(P)
+        boxes = shadow_mod.mesh_boxes(np.concatenate(V), np.concatenate(Ts))
         if boxes:
             model_shadows[key] = [shadow_mod.part_record(p) for p in boxes]
-            rep[f"models with shadow stand-ins ({src})"] += 1
+            rep["models with shadow stand-ins"] += 1
 
     spawn = None
     for e in vmf.entities:
@@ -376,6 +368,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                            liquid=mats[m].liquid if m in mats else False,       # water: see-through, no collision
                            energy=mats[m].energy if m in mats else False,       # fizzler fields: glowing, see-through
                            nocull=mats[m].nocull if m in mats else False,       # both sides drawn (foliage)
+                           blend=mats[m].alpha_blend if m in mats else False,   # alpha blends (else a cut-out)
                            pbr=pbr_const.get(m))     # flat roughness/metalness values, RTX hash
                    for m in used},
         lights=dict(surface=light_rep.surface, points=light_rep.points, sun=light_rep.sun) if light_rep
