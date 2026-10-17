@@ -147,9 +147,21 @@ class MaterialInfo:
         return self.shader.lower() == "water"
 
     @property
+    def energy(self) -> bool:
+        """Portal 2's SolidEnergy fields (fizzlers): the base texture is a data mask (flow
+        masks in its channels), the colour comes from $flow_vortex_color."""
+        return self.shader.lower() == "solidenergy"
+
+    @property
     def refract_tint(self) -> list[int] | None:
         """For Refract-shader glass (no base texture; Source draws the scene behind it, tinted
-        and distorted): the tint as 0-255 RGB. Water: its fog colour. None for other shaders."""
+        and distorted): the tint as 0-255 RGB. Water: its fog colour. Energy fields: their vortex
+        colour, scaled to full brightness. None for other shaders."""
+        if self.energy:
+            nums = [float(x) for x in re.findall(r"[-\d.]+", self.params.get("$flow_vortex_color", "[0.6 2 2.5]"))[:3]]
+            if len(nums) < 3 or max(nums) <= 0:
+                nums = [0.6, 2.0, 2.5]
+            return [int(round(255 * c / max(nums))) for c in nums]
         if self.liquid:
             nums = [float(x) for x in re.findall(r"[-\d.]+", self.params.get("$fogcolor", "{ 60 80 90 }"))[:3]]
             return [int(round(min(255, max(0, c)))) for c in nums] if len(nums) == 3 else [60, 80, 90]

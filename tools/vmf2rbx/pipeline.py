@@ -374,6 +374,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                            texlight=light_rep.texlights.get(m) if light_rep else None,
                            glass=mats[m].refract_tint if m in mats else None,   # Refract glass/water: tint
                            liquid=mats[m].liquid if m in mats else False,       # water: see-through, no collision
+                           energy=mats[m].energy if m in mats else False,       # fizzler fields: glowing, see-through
                            pbr=pbr_const.get(m))     # flat roughness/metalness values, RTX hash
                    for m in used},
         lights=dict(surface=light_rep.surface, points=light_rep.points, sun=light_rep.sun) if light_rep

@@ -18,7 +18,33 @@ from .models import angle_matrix, load_model, submeshes
 PROP_CLASSES = ("prop_static", "prop_dynamic", "prop_dynamic_override", "prop_physics",
                 "prop_physics_override", "prop_physics_multiplayer")
 
+# Entities whose model comes from their class, not a "model" keyvalue (Portal 2)
+IMPLICIT_MODELS = {
+    "prop_testchamber_door": "models/props/portal_door_combined.mdl",
+    "npc_security_camera": "models/props/security_camera.mdl",
+    "npc_personality_core": "models/npcs/personality_sphere/personality_sphere.mdl",
+    "prop_button": "models/props/switch001.mdl",
+    "prop_under_button": "models/props_underground/underground_testchamber_button.mdl",
+    "prop_floor_button": "models/props/portal_button.mdl",
+    "prop_floor_cube_button": "models/props/box_socket.mdl",
+    "prop_floor_ball_button": "models/props/ball_button.mdl",
+    "prop_laser_catcher": "models/props/laser_catcher_center.mdl",
+    "env_portal_laser": "models/props/laser_emitter_center.mdl",
+    "prop_wall_projector": "models/props/wall_emitter.mdl",
+    "prop_tractor_beam": "models/props/tractor_beam_emitter.mdl",
+}
+CUBE_MODELS = {0: "models/props/metal_box.mdl", 1: "models/props/metal_box.mdl", 2: "models/props/reflection_cube.mdl"}
+
 C = np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]])     # Source -> Roblox axes (x, z, -y)
+
+
+def entity_model(e) -> str | None:
+    if e["model"]:
+        return e["model"]
+    cls = e["classname"]
+    if cls == "prop_weighted_cube":
+        return CUBE_MODELS.get(int(float(e["CubeType"] or 0)))
+    return IMPLICIT_MODELS.get(cls)
 
 
 def _floats(s: str, n: int) -> list[float]:
@@ -71,14 +97,15 @@ def build_props(vmf, fsys, read, region=None, geom: dict | None = None, hulls: d
     models, blobs, instances, missing = {}, {}, [], set()
     for e in vmf.entities:
         cls = e["classname"]
-        if cls not in PROP_CLASSES or not e["model"]:
+        model = entity_model(e)
+        if not model or (cls not in PROP_CLASSES and cls not in IMPLICIT_MODELS and cls != "prop_weighted_cube"):
             continue
         origin = np.array(_floats(e["origin"], 3))
         if region is not None:
             lo, hi = map(np.asarray, region)
             if not (np.all(origin > lo) and np.all(origin < hi)):
                 continue
-        path = e["model"].replace("\\", "/").lower()
+        path = model.replace("\\", "/").lower()
         stem = path[:-4] if path.endswith(".mdl") else path
         skin = int(float(e["skin"] or 0))
         body = int(float(e["SetBodyGroup"] or e["body"] or 0))
@@ -103,7 +130,8 @@ def build_props(vmf, fsys, read, region=None, geom: dict | None = None, hulls: d
                         lo, hi = P.min(0), P.max(0)
                         centre = (lo + hi) / 2
                         name = f"mesh:{key}:{i}"
-                        blobs[name] = mesh_blob(P - centre, N, sm.uvs, sm.triangles[:, ::-1])
+                        uv = sm.uvs - np.floor(sm.uvs.min(0))      # whole tiles, near 0 (see brushmesh.near_zero)
+                        blobs[name] = mesh_blob(P - centre, N, uv, sm.triangles[:, ::-1])
                         if geom is not None:
                             geom.setdefault(key, []).append((sm.material, P, sm.triangles[:, ::-1]))
                         subs.append(dict(blob=name, material=sm.material, n=len(P), m=len(sm.triangles),

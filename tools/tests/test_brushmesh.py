@@ -79,11 +79,16 @@ def test_uvs_follow_hammer_mapping():
     k = 0
     for s in b.visible_sides:
         poly = face_polygon(b, s)
+        shift = None
         for v in poly:
             assert np.allclose(S[k], v, atol=1e-3)
-            want = ((v @ s.u.vec) / s.u.scale + s.u.offset) / W, ((v @ s.v.vec) / s.v.scale + s.v.offset) / H
-            assert np.allclose(U[k], want, atol=1e-5)
+            want = np.array([((v @ s.u.vec) / s.u.scale + s.u.offset) / W, ((v @ s.v.vec) / s.v.scale + s.v.offset) / H])
+            d = U[k] - want                    # whole tiles, the same across the face (near_zero)
+            assert np.allclose(d, np.round(d), atol=1e-5)
+            shift = d if shift is None else shift
+            assert np.allclose(d, shift, atol=1e-5)
             k += 1
+    assert U.min() >= -1e-6 and U.min(0).max() < 1          # each face starts within the first tile
 
 
 def test_hidden_side_whose_vertices_stay_covered_needs_no_collider():

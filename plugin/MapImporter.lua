@@ -440,9 +440,14 @@ function MapImporter.build(contents: string, options: Options?)
 				-- See-through in the tint colour, and no shadow so lights shine through. Water
 				-- (tinted by its fog colour) is murkier, and you fall into it.
 				p.Color = Color3.fromRGB(m.glass[1], m.glass[2], m.glass[3])
-				p.Transparency = if m.liquid then 0.3 else (opts.glassTransparency or 0.75)
+				p.Transparency = if m.liquid then 0.3 elseif m.energy then 0.8 else (opts.glassTransparency or 0.75)
 				p.CastShadow = false
-				if m.liquid then p.CanCollide, p.CanQuery = false, false end
+				if m.liquid or m.energy then p.CanCollide, p.CanQuery = false, false end
+				if m.energy then p.Material = Enum.Material.Neon end
+			end
+			if rec.owner:sub(1, 8) == "trigger_" then
+				-- trigger volumes (fizzler fields etc.) don't block anything
+				p.CanCollide, p.CanQuery = false, false
 			end
 			target = folder(folderName(rec))
 			if rec.piece > 0 then
@@ -619,9 +624,10 @@ function MapImporter.build(contents: string, options: Options?)
 					local mm = meta.materials[sm.material]
 					if mm and mm.glass then
 						mp.Color = Color3.fromRGB(mm.glass[1], mm.glass[2], mm.glass[3])
-						mp.Transparency = if mm.liquid then 0.3 else (opts.glassTransparency or 0.75)
+						mp.Transparency = if mm.liquid then 0.3 elseif mm.energy then 0.8 else (opts.glassTransparency or 0.75)
 						mp.CastShadow = false
-						if mm.liquid then mp.CanCollide, mp.CanQuery, mp.CanTouch = false, false, false end
+						if mm.liquid or mm.energy then mp.CanCollide, mp.CanQuery, mp.CanTouch = false, false, false end
+						if mm.energy then mp.Material = Enum.Material.Neon end
 					elseif mm and mm.texlight and opts.texlightsAsNeon ~= false then
 						mp.Material = Enum.Material.Neon
 					end

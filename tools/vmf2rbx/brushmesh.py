@@ -50,6 +50,13 @@ def face_uv(s: Side, P: np.ndarray, size) -> np.ndarray:
     return np.stack([su / W, tv / H], 1)
 
 
+def near_zero(uv: np.ndarray) -> np.ndarray:
+    """Shift UVs by whole tiles so they start near 0 (the texture looks identical). Measured in
+    Studio: a SurfaceAppearance draws black when the UVs are large (sp_a1_intro3's elevator
+    floor sat around (-11, -32); the same mesh shifted near 0 draws correctly)."""
+    return uv - np.floor(uv.min(0))
+
+
 def _fan(n0: int, k: int) -> list[tuple[int, int, int]]:
     return [(n0, n0 + i, n0 + i + 1) for i in range(1, k - 1)]
 
@@ -75,7 +82,7 @@ def brush_mesh_record(b: Brush, sizes: dict):
             T += _fan(sum(len(p) for p in P), len(poly))
             P.append(to_roblox(poly) * SPU - centre)
             N.append(np.repeat(to_roblox(s.normal)[None], len(poly), 0))
-            U.append(face_uv(s, poly, sizes.get(mat, DEFAULT_TEX)))
+            U.append(near_zero(face_uv(s, poly, sizes.get(mat, DEFAULT_TEX))))
         P, N, U = np.concatenate(P), np.concatenate(N), np.concatenate(U)
         blob = mesh_blob(P, N, U, np.array(T))
         name = _blob_name("brushmesh", blob)
@@ -159,7 +166,7 @@ def displacement_record(b: Brush, sizes: dict):
         for k in range(3):
             np.add.at(N, T[:, k], fn)
         N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-9)
-        U = face_uv(s, base, sizes.get(s.material, DEFAULT_TEX))
+        U = near_zero(face_uv(s, base, sizes.get(s.material, DEFAULT_TEX)))
         meshes.append((s.material, P, N, U, T))
         pts.append(P)
     if not meshes:
