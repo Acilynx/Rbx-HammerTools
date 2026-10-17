@@ -128,8 +128,9 @@ def _first_anim_value(b, ptr_base, offs, scale):
     return np.array(out)
 
 
-def rest_pose(mdl: bytes) -> list[np.ndarray]:
-    """Per bone, the 3x4 skinning matrix (BoneToModel * PoseToBone) for sequence 0, frame 0."""
+def rest_pose(mdl: bytes, bone_to_model: bool = False) -> list[np.ndarray]:
+    """Per bone, the 3x4 skinning matrix (BoneToModel * PoseToBone) for sequence 0, frame 0.
+    bone_to_model=True: just BoneToModel (for data stored in bone space, like .phy hulls)."""
     nb, bo = struct.unpack_from("<2i", mdl, 156)
     bones = []
     for i in range(nb):
@@ -192,12 +193,19 @@ def rest_pose(mdl: bytes) -> list[np.ndarray]:
         if bd["parent"] >= 0:
             m = world[bd["parent"]] @ m
         world.append(m)
+    if bone_to_model:
+        return [m[:3, :] for m in world]
     out = []
     for bd, m in zip(bones, world):
         p2b = np.eye(4)
         p2b[:3, :] = bd["p2b"]
         out.append((m @ p2b)[:3, :])
     return out
+
+
+def bone_names(mdl: bytes) -> list[str]:
+    nb, bo = struct.unpack_from("<2i", mdl, 156)
+    return [_cstr(mdl, bo + 216 * i + struct.unpack_from("<i", mdl, bo + 216 * i)[0]) for i in range(nb)]
 
 
 def parse_vvd(vvd: bytes) -> np.ndarray:

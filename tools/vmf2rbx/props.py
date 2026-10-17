@@ -34,8 +34,37 @@ def mesh_blob(pos, nrm, uv, tris) -> bytes:
             + np.ascontiguousarray(uv, "<f4").tobytes() + np.ascontiguousarray(tris, "<u4").tobytes())
 
 
-def build_props(vmf, fsys, read, region=None):
-    """Returns (models: {key: [submesh records]}, blobs: {name: bytes}, instances: [..], report)."""
+def _bbox_iou(P, Q) -> float:
+    lo, hi, qlo, qhi = P.min(0), P.max(0), Q.min(0), Q.max(0)
+    inter = np.prod(np.clip(np.minimum(hi, qhi) - np.maximum(lo, qlo), 0, None))
+    return float(inter / max(np.prod(hi - lo) + np.prod(qhi - qlo) - inter, 1e-9))
+
+
+def model_hulls(mdl: bytes, phy: bytes | None, positions: np.ndarray) -> list:
+    """The model's .phy convex pieces in the same space as its mesh (Source units). The pieces
+    are stored in their bone's space; one-bone props need that bone's rest transform (measured:
+    62 of sp_a1_intro3's 76 collision models line up with it, 2 without). Pieces that line up
+    neither way are left out."""
+    from .models import rest_pose
+    from .phy import parse_phy_faces
+    if not phy:
+        return []
+    pieces = parse_phy_faces(phy)
+    if not pieces:
+        return []
+    Q = np.concatenate([p for p, _ in pieces])
+    W = rest_pose(mdl, bone_to_model=True)
+    cands = [(np.eye(3), np.zeros(3))] + ([(W[0][:, :3], W[0][:, 3])] if W else [])
+    best = max(cands, key=lambda m: _bbox_iou(positions, Q @ m[0].T + m[1]))
+    if _bbox_iou(positions, Q @ best[0].T + best[1]) < 0.3:
+        return []
+    return [(p @ best[0].T + best[1], t) for p, t in pieces]
+
+
+def build_props(vmf, fsys, read, region=None, geom: dict | None = None, hulls: dict | None = None):
+    """Returns (models: {key: [submesh records]}, blobs: {name: bytes}, instances: [..], report).
+    `geom`, if given, collects each model's submeshes as {key: [(material, positions in the
+    model's own space (studs, Roblox axes), triangles counter-clockwise)]} (for shadow stand-ins)."""
     from collections import Counter
     rep = Counter()
     exists = lambda m: read(f"materials/{m}.vmt") is not None
@@ -62,6 +91,11 @@ def build_props(vmf, fsys, read, region=None):
             else:
                 try:
                     md = load_model(*files, name=stem, body=body)
+                    if hulls is not None and md.meshes:
+                        allp = np.concatenate([m[1] for m in md.meshes])
+                        hs = model_hulls(files[0], read(stem + ".phy"), allp)
+                        if hs:
+                            hulls[key] = [(to_roblox(p) * SPU, t) for p, t in hs]
                     subs = []
                     for i, sm in enumerate(submeshes(md, skin, exists)):
                         P = to_roblox(sm.positions) * SPU
@@ -70,6 +104,8 @@ def build_props(vmf, fsys, read, region=None):
                         centre = (lo + hi) / 2
                         name = f"mesh:{key}:{i}"
                         blobs[name] = mesh_blob(P - centre, N, sm.uvs, sm.triangles[:, ::-1])
+                        if geom is not None:
+                            geom.setdefault(key, []).append((sm.material, P, sm.triangles[:, ::-1]))
                         subs.append(dict(blob=name, material=sm.material, n=len(P), m=len(sm.triangles),
                                          centre=[round(float(x), 6) for x in centre]))
                     models[key] = subs

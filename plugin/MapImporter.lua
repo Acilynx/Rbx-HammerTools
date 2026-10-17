@@ -545,6 +545,25 @@ function MapImporter.build(contents: string, options: Options?)
 		counts.lights += 1
 	end
 
+	-- Shadow stand-ins: MeshParts made from an EditableMesh cast no shadow (Roblox; measured), so
+	-- opaque Parts hidden just inside each mesh cast it instead (tools/vmf2rbx/shadow.py). They
+	-- don't collide or take raycasts.
+	local function shadowPart(r, cf: CFrame?): BasePart
+		local p = Instance.new(if r.cls == "WedgePart" then "WedgePart" else "Part") :: BasePart
+		p.Name = "shadow"
+		p.Anchored = true
+		p.CanCollide, p.CanQuery, p.CanTouch = false, false, false
+		p.CastShadow = true
+		p.Material = Enum.Material.SmoothPlastic
+		p.TopSurface, p.BottomSurface = Enum.SurfaceType.Smooth, Enum.SurfaceType.Smooth
+		p.Color = Color3.fromRGB(30, 30, 30)
+		p.Size = Vector3.new(r.s[1], r.s[2], r.s[3])
+		local local_ = cframeOf(r.c, r.r)
+		p.CFrame = if cf then cf * local_ else local_
+		return p
+	end
+	local shadowCount = 0
+
 	-- props: one MeshPart per (model, material), built once and cloned per placement
 	local blobMeta = {}
 	for _, b in ipairs(meta.blobs or {}) do blobMeta[b.name] = b end
@@ -584,7 +603,9 @@ function MapImporter.build(contents: string, options: Options?)
 							sa.EmissiveStrength = eStrength
 						end
 						local mm = meta.materials[sm.material]
-						if mm and mm.alpha then
+						if mm and mm.texlight and opts.texlightsAsNeon ~= false then
+							sa = nil :: any
+						elseif mm and mm.alpha then
 							sa.AlphaMode = Enum.AlphaMode.Transparency
 							-- Measured in Studio: at Transparency 0 the alpha is only a cut-out (any
 							-- alpha > 0 draws solid, so fences work but glass is opaque). Any value
@@ -592,7 +613,17 @@ function MapImporter.build(contents: string, options: Options?)
 							mp.Transparency = 0.02
 							mp.CastShadow = false
 						end
-						sa.Parent = mp
+						if sa then sa.Parent = mp end
+					end
+					-- glass and water (no image: Refract/Water shaders), texture lights
+					local mm = meta.materials[sm.material]
+					if mm and mm.glass then
+						mp.Color = Color3.fromRGB(mm.glass[1], mm.glass[2], mm.glass[3])
+						mp.Transparency = if mm.liquid then 0.3 else (opts.glassTransparency or 0.75)
+						mp.CastShadow = false
+						if mm.liquid then mp.CanCollide, mp.CanQuery, mp.CanTouch = false, false, false end
+					elseif mm and mm.texlight and opts.texlightsAsNeon ~= false then
+						mp.Material = Enum.Material.Neon
 					end
 					templates[key] = mp
 				end
@@ -631,6 +662,10 @@ function MapImporter.build(contents: string, options: Options?)
 					mp.Parent = model
 				end
 			end
+			for _, r in ipairs((meta.model_shadows or {})[inst.model] or {}) do
+				shadowPart(r, cf).Parent = model
+				shadowCount += 1
+			end
 			model.Parent = propFolder
 			counts.props += 1
 		end
@@ -662,17 +697,6 @@ function MapImporter.build(contents: string, options: Options?)
 				mp.CFrame = cf
 				mp:SetAttribute("SourceId", rec.id)
 				mp:SetAttribute("SourceKind", rec.kind)
-				local m = meta.materials[sm.material]
-				if m and m.texlight and opts.texlightsAsNeon ~= false then
-					local sa = mp:FindFirstChildOfClass("SurfaceAppearance")
-					if sa then sa:Destroy() end
-					mp.Material = Enum.Material.Neon
-				elseif m and m.glass then
-					mp.Color = Color3.fromRGB(m.glass[1], m.glass[2], m.glass[3])
-					mp.Transparency = if m.liquid then 0.3 else (opts.glassTransparency or 0.75)
-					mp.CastShadow = false
-					if m.liquid then mp.CanCollide, mp.CanQuery = false, false end
-				end
 				mp.Parent = model
 				table.insert(byBrush[rec.id], mp)
 				counts.meshes += 1
@@ -690,6 +714,10 @@ function MapImporter.build(contents: string, options: Options?)
 				cp:SetAttribute("SourceId", rec.id)
 				cp.Parent = model
 			end
+		end
+		for _, r in ipairs(rec.shadow or {}) do
+			shadowPart(r).Parent = model
+			shadowCount += 1
 		end
 		model.Parent = folder(folderName(rec))
 		if i % 50 == 0 then
@@ -723,8 +751,8 @@ function MapImporter.build(contents: string, options: Options?)
 
 	progress("refreshing images")
 	local refreshed = MapImporter.refreshImages(root)
-	progress(string.format("done: %d parts, %d brush meshes, %d textures (%d images), %d props, %d lights, %d placeholders",
-		counts.parts, counts.meshes, counts.textures, refreshed, counts.props, counts.lights, counts.placeholders))
+	progress(string.format("done: %d parts, %d brush meshes, %d textures (%d images), %d props, %d lights, %d shadow stand-ins, %d placeholders",
+		counts.parts, counts.meshes, counts.textures, refreshed, counts.props, counts.lights, shadowCount, counts.placeholders))
 	if imageFailures > 0 then
 		warn(string.format("[MapImporter] %d images couldn't be created (EditableImage memory budget?); those maps are missing", imageFailures))
 	end

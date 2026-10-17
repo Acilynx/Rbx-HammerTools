@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from .brushes import Brush, load_vmf_brushes
-from .coords import point_to_roblox
+from .coords import SPU, point_to_roblox, to_roblox
 from .geometry import (PartSpec, brush_to_parts, brush_volume, inside_brush, inside_piece,
                        near_surface, piece_volume)
 from .textures import texture_part
@@ -116,10 +116,12 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     say("loading props")
     # --- props (meshes per model; their materials join the texture loading below)
     prop_models, prop_blobs, prop_instances, prop_missing = {}, {}, [], []
+    prop_geom: dict = {}
+    prop_hulls: dict = {}
     if opts.props and fsys is not None:
         from .props import build_props
         prop_models, prop_blobs, prop_instances, prep, prop_missing = build_props(
-            vmf, fsys, lambda p: assets._read(fsys, p), opts.region)
+            vmf, fsys, lambda p: assets._read(fsys, p), opts.region, prop_geom, prop_hulls)
         for k, v in prep.items():
             rep[f"props: {k}"] += v
     prop_mats = sorted({sm["material"] for subs in prop_models.values() for sm in subs})
@@ -132,7 +134,9 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         for m in used:
             info = assets.resolve_material(fsys, m)
             mats[m] = info
-            img = None if info.missing else assets.load_base_image(fsys, info)
+            # Refract glass draws the room behind it; Portal 2's also has a $basetexture (a
+            # light-streak overlay) that would make it opaque here. It becomes tinted glass.
+            img = None if info.missing or info.refract_tint is not None else assets.load_base_image(fsys, info)
             if img is None:
                 rep["material without loadable texture"] += 1
                 continue
@@ -254,8 +258,15 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     parts_out = []
     baked = {}
     from .brushmesh import brush_mesh_record, displacement_record
+    from . import shadow as shadow_mod
+
+    def casts_shadow(m: str) -> bool:
+        info = mats.get(m)
+        return not (info and (info.keeps_alpha or info.refract_tint is not None)) and m not in texlight_mats
+
     for b, parts in built:
         probe = None
+        orig_parts = parts
         if parts[0].cls != "Mesh" and sizes and opts.angled_as_mesh:
             # A face whose texture runs at an angle a Part's Texture can't express: the brush as
             # a mesh maps it exactly, where baking costs one image per face (686 in sp_a1_intro3)
@@ -265,6 +276,15 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                                   f"{parts[0].kind} (angled texture)")]
                 rep["brushes as meshes for angled textures"] += 1
         if parts[0].cls == "Mesh":
+            # shadow stand-ins (EditableMesh MeshParts cast none; see shadow.py)
+            stand_ins = []
+            if parts[0].kind != "displacement" and any(casts_shadow(sd.material) for sd in b.visible_sides):
+                if orig_parts[0].cls in ("Part", "WedgePart"):
+                    stand_ins = [shadow_mod.shrink(p) for p in orig_parts]
+                else:
+                    R = to_roblox(b.verts) * SPU
+                    stand_ins = shadow_mod.convex_brush_boxes(R, [(to_roblox(sd.normal), sd.dist * SPU) for sd in b.sides])
+                rep["shadow stand-ins (brush meshes)"] += len(stand_ins)
             if parts[0].kind == "displacement":
                 rec, mblobs = displacement_record(b, sizes)
                 if rec is None:
@@ -276,6 +296,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                 rec["s"] = [round(float(x), 6) for x in parts[0].size]
                 rep["brush meshes"] += 1
             prop_blobs.update(mblobs)
+            rec["shadow"] = [shadow_mod.part_record(p) for p in stand_ins]
             parts_out.append(dict(id=b.id, piece=0, cls="Mesh", owner=b.owner, entity=b.entity_name,
                                   mat=(b.disp_sides[0].material if b.disp_sides else b.dominant_material()),
                                   kind=parts[0].kind, faces=[], **rec))
@@ -316,6 +337,26 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             images[f"{m}#{k}"] = arr                  # importer: <image key>#n / #r / #m
     images.update({k: img for k, img in baked.items() if k.split("#")[0] in face_imgs})
 
+    # shadow stand-ins for props, per model: from its collision hulls (.phy) when it has them,
+    # else from the enclosed volume of its opaque submeshes
+    model_shadows = {}
+    for key, subs in prop_geom.items():
+        opaque = [(P, T) for m, P, T in subs if casts_shadow(m)]
+        if not opaque:
+            continue
+        if key in prop_hulls:
+            boxes = shadow_mod.hull_boxes(prop_hulls[key])
+            src = "collision hulls"
+        else:
+            V, Ts, base = [], [], 0
+            for P, T in opaque:
+                V.append(P); Ts.append(T + base); base += len(P)
+            boxes = shadow_mod.mesh_boxes(np.concatenate(V), np.concatenate(Ts))
+            src = "enclosed volume"
+        if boxes:
+            model_shadows[key] = [shadow_mod.part_record(p) for p in boxes]
+            rep[f"models with shadow stand-ins ({src})"] += 1
+
     spawn = None
     for e in vmf.entities:
         if e["classname"] == "info_player_start":
@@ -338,6 +379,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         lights=dict(surface=light_rep.surface, points=light_rep.points, sun=light_rep.sun) if light_rep
         else dict(surface=[], points=[], sun=None),
         models=prop_models,
+        model_shadows=model_shadows,
         props=prop_instances,
     )
     report = dict(counts=dict(sorted(rep.items())), problems=problems, warnings=warnings,
