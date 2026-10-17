@@ -24,7 +24,8 @@ def _unpack(blob, n, m):
     a = np.frombuffer(blob[: 32 * n], "<f4")
     P = a[: 3 * n].reshape(n, 3); N = a[3 * n: 6 * n].reshape(n, 3); U = a[6 * n:].reshape(n, 2)
     T = np.frombuffer(blob[32 * n:], "<u4").reshape(m, 3)
-    return P.astype(float), N.astype(float), U.astype(float), T
+    # the last 2 triangles / 6 vertices are the zero-area bounds padding (brushmesh.with_bounds)
+    return P[:-6].astype(float), N[:-6].astype(float), U[:-6].astype(float), T[:-2]
 
 
 def test_brush_with_displacement_becomes_displacement_mesh():
@@ -38,7 +39,7 @@ def test_flat_displacement_reproduces_the_face_outward():
     assert len(rec["meshes"]) == 1                       # only the displaced side is kept
     m = rec["meshes"][0]
     P, N, U, T = _unpack(blobs[m["blob"]], m["n"], m["m"])
-    assert m["n"] == 25 and m["m"] == 32
+    assert m["n"] == 25 + 6 and m["m"] == 32 + 2        # plus the bounds padding
     g = np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]])
     area = np.linalg.norm(g, axis=1).sum() / 2
     assert np.isclose(area, (128 * SPU) ** 2)

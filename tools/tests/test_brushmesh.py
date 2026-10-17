@@ -8,11 +8,14 @@ from vmf2rbx.geometry import brush_to_parts, brush_volume, classify
 from vmf2rbx.coords import SPU, to_roblox
 
 
-def _unpack(blob, n, m):
+def _unpack(blob, n, m, pad=True):
     a = np.frombuffer(blob[: 4 * 8 * n], "<f4")
     P = a[: 3 * n].reshape(n, 3); N = a[3 * n: 6 * n].reshape(n, 3); U = a[6 * n:].reshape(n, 2)
     T = np.frombuffer(blob[4 * 8 * n:], "<u4").reshape(m, 3)
-    return P.astype(float), N.astype(float), U.astype(float), T
+    # the last 2 triangles / 6 vertices are the zero-area bounds padding (brushmesh.with_bounds)
+    if not pad:                                          # collision hulls have none
+        return P.astype(float), N.astype(float), U.astype(float), T
+    return P[:-6].astype(float), N[:-6].astype(float), U[:-6].astype(float), T[:-2]
 
 
 def _volume(P, T):
@@ -103,12 +106,23 @@ def test_hidden_sides_get_a_collision_hull():
     rec, blobs = brush_mesh_record(b, {})
     assert rec["collider"] is not None
     c = rec["collider"]
-    P, _, _, T = _unpack(blobs[c["blob"]], c["n"], c["m"])
+    P, _, _, T = _unpack(blobs[c["blob"]], c["n"], c["m"], pad=False)
     assert np.isclose(_volume(P, T), brush_volume(b), rtol=1e-6)
-    assert rec["meshes"][0]["m"] == 1                 # the visible mesh is just the chamfer
+    assert rec["meshes"][0]["m"] == 1 + 2             # the chamfer, plus the bounds padding
 
 
 def test_identical_shapes_share_a_blob():
     a, _ = brush_mesh_record(chamfered_box(1), {})
     b, _ = brush_mesh_record(chamfered_box(2), {})
     assert a["meshes"][0]["blob"] == b["meshes"][0]["blob"]
+
+
+def test_flat_mesh_gets_the_brushes_full_box():
+    # only the chamfer is visible; its MeshPart must still span the brush (occlusion culling)
+    b = chamfered_box(tool_sides=range(6))
+    rec, blobs = brush_mesh_record(b, {})
+    m = rec["meshes"][0]
+    a = np.frombuffer(blobs[m["blob"]][: 12 * m["n"]], "<f4").reshape(-1, 3)
+    R = to_roblox(b.verts) * SPU
+    assert np.allclose(a.min(0) + rec["c"], R.min(0), atol=1e-3)
+    assert np.allclose(a.max(0) + rec["c"], R.max(0), atol=1e-3)

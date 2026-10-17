@@ -622,6 +622,9 @@ function MapImporter.build(contents: string, options: Options?)
 					end
 					-- glass and water (no image: Refract/Water shaders), texture lights
 					local mm = meta.materials[sm.material]
+					if mm and mm.nocull then
+						mp.DoubleSided = true          -- $nocull (foliage cards): both sides drawn
+					end
 					if mm and mm.glass then
 						mp.Color = Color3.fromRGB(mm.glass[1], mm.glass[2], mm.glass[3])
 						mp.Transparency = if mm.liquid then 0.3 elseif mm.energy then 0.8 else (opts.glassTransparency or 0.75)

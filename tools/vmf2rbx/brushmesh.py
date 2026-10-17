@@ -57,6 +57,22 @@ def near_zero(uv: np.ndarray) -> np.ndarray:
     return uv - np.floor(uv.min(0))
 
 
+def with_bounds(P, N, U, T, lo, hi):
+    """Add two zero-area triangles at the corners lo and hi: they draw nothing but give the
+    MeshPart that bounding box. A flat mesh (a brush whose other sides are nodraw) otherwise gets
+    a 0.001-stud-thick box, and Roblox's occlusion culling hid it behind props in front
+    (sp_a1_intro3 brush 5190; measured: with the brush's full box it stays drawn)."""
+    k = len(P)
+    extra = []
+    for c in (lo, hi):
+        extra += [c, c + [1e-4, 0, 0], c + [2e-4, 0, 0]]
+    P = np.concatenate([P, np.array(extra)])
+    N = np.concatenate([N, np.tile([0.0, 1.0, 0.0], (6, 1))])
+    U = np.concatenate([U, np.zeros((6, 2))])
+    T = np.concatenate([np.asarray(T).reshape(-1, 3), [[k, k + 1, k + 2], [k + 3, k + 4, k + 5]]])
+    return P, N, U, T
+
+
 def _fan(n0: int, k: int) -> list[tuple[int, int, int]]:
     return [(n0, n0 + i, n0 + i + 1) for i in range(1, k - 1)]
 
@@ -84,7 +100,8 @@ def brush_mesh_record(b: Brush, sizes: dict):
             N.append(np.repeat(to_roblox(s.normal)[None], len(poly), 0))
             U.append(near_zero(face_uv(s, poly, sizes.get(mat, DEFAULT_TEX))))
         P, N, U = np.concatenate(P), np.concatenate(N), np.concatenate(U)
-        blob = mesh_blob(P, N, U, np.array(T))
+        P, N, U, T = with_bounds(P, N, U, T, R.min(0) - centre, R.max(0) - centre)
+        blob = mesh_blob(P, N, U, T)
         name = _blob_name("brushmesh", blob)
         blobs[name] = blob
         meshes.append(dict(blob=name, material=mat, n=len(P), m=len(T)))
@@ -174,8 +191,12 @@ def displacement_record(b: Brush, sizes: dict):
     allp = np.concatenate(pts)
     centre = (allp.min(0) + allp.max(0)) / 2
     out = []
+    blo, bhi = R.min(0), R.max(0)                    # the brush's box, so the mesh isn't paper-thin
+    centre = (np.minimum(allp.min(0), blo) + np.maximum(allp.max(0), bhi)) / 2
     for mat, P, N, U, T in meshes:
-        blob = mesh_blob(P - centre, N, U, T)
+        P, N, U, T = with_bounds(P - centre, N, U, T, np.minimum(allp.min(0), blo) - centre,
+                                 np.maximum(allp.max(0), bhi) - centre)
+        blob = mesh_blob(P, N, U, T)
         name = _blob_name("dispmesh", blob)
         blobs[name] = blob
         out.append(dict(blob=name, material=mat, n=len(P), m=len(T)))

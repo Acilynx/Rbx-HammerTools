@@ -147,6 +147,11 @@ class MaterialInfo:
         return self.shader.lower() == "water"
 
     @property
+    def nocull(self) -> bool:
+        """$nocull: drawn from both sides (foliage cards)."""
+        return self.params.get("$nocull") == "1"
+
+    @property
     def energy(self) -> bool:
         """Portal 2's SolidEnergy fields (fizzlers): the base texture is a data mask (flow
         masks in its channels), the colour comes from $flow_vortex_color."""
