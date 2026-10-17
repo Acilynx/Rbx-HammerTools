@@ -67,3 +67,29 @@ def test_shrink_keeps_centre():
     p = PartSpec("Part", np.array([1.0, 2, 3]), np.array([2.0, 2, 2]), np.eye(3))
     q = shrink(p)
     assert np.allclose(q.center, p.center) and np.allclose(q.size, 2 - 2 * MARGIN)
+
+
+def _inside_box(P, lo, hi, eps=1e-6):
+    return np.all(P > np.asarray(lo) - eps) and np.all(P < np.asarray(hi) + eps)
+
+
+def test_thin_sheet_gets_plates_inside_it():
+    # a 4 x 4 panel 0.07 thick (sp_a1_intro3's broken walls): far thinner than the volume grid
+    from vmf2rbx.shadow import mesh_plates, model_stand_ins
+    V, T = _cube_mesh((0, 0, 0), (4, 0.07, 4))
+    assert mesh_boxes(V, T) == []
+    plates = mesh_plates(V, T)
+    assert plates
+    for p in plates:
+        assert _inside_box(_corners(p), (0, 0.005, 0), (4, 0.065, 4))
+    assert sum(p.size[0] * p.size[1] for p in plates) > 0.8 * 16      # one face covered, once
+    assert len(model_stand_ins(V, T, budget=10)) <= 10
+
+
+def test_open_box_gets_no_plates_inside_it():
+    # a bin (top missing): a plate behind its walls would show through the opening
+    from vmf2rbx.shadow import model_stand_ins
+    V, T = _cube_mesh((0, 0, 0), (2, 2, 2))
+    top = [i for i, t in enumerate(T) if np.allclose(V[t][:, 1], 2)]
+    T = np.delete(T, top, axis=0)
+    assert model_stand_ins(V, T) == []

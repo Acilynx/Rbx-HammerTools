@@ -8,8 +8,8 @@ the stand-ins are opaque Parts hidden just inside each mesh: never seen, but in 
 * brushes split into Parts that became meshes only for an angled texture: their exact pieces,
   shrunk by MARGIN
 * other convex brushes: boxes filling the inside (voxels merged into boxes)
-* props: the same for the model's closed parts; inside = ray parity along two axes, both agreeing
-  (open meshes, cards and foliage give no stand-ins rather than stray visible boxes)
+* props: volume boxes and thin plates inside the model's solid parts (see "prop models" below);
+  open meshes, cards and foliage give no stand-ins rather than stray visible boxes
 
 All sizes in studs.
 """
@@ -131,116 +131,249 @@ def hull_boxes(pieces: list[tuple[np.ndarray, np.ndarray]], margin: float = MARG
     return sorted(out, key=lambda p: -np.prod(p.size))[:max_boxes]
 
 
-# ------------------------------------------------------------------ closed triangle meshes
+# ------------------------------------------------------------------ prop models (triangle meshes)
+#
+# Two kinds of stand-in, both kept strictly inside the model's solid parts:
+#
+# * volume boxes: a grid of points classified inside/outside by winding number (signed ray
+#   crossings, counted along all three axes, all three must agree), cells with all 8 corners
+#   inside, merged into boxes. Winding numbers handle models built from overlapping closed
+#   pieces; an open model (a bin, a card) fails at least one axis and gets nothing there.
+# * plates: Portal 2's broken walls, beams and panels are thin sheets (sp_a1_intro3's
+#   wall_dest models average 0.07 studs thick), far thinner than any affordable grid. For each
+#   large flat region of the surface, a ray from each grid point on it goes inward to the
+#   first surface behind; where that surface faces back (so the ray stayed inside the solid),
+#   a thin plate fills the gap, a little behind the face. Plates of the opposite face of the
+#   same sheet are skipped.
 
-def _crossings(V: np.ndarray, T: np.ndarray, axis: int, u: np.ndarray, v: np.ndarray) -> list[np.ndarray]:
-    """For each line parallel to `axis` through (u[k], v[k]) in the other two axes: the
-    coordinates along `axis` where it crosses the mesh."""
-    o = [d for d in range(3) if d != axis]
-    A, B, C = V[T[:, 0]], V[T[:, 1]], V[T[:, 2]]
-    a, b, c = A[:, o], B[:, o], C[:, o]
+def _grid_ray_hits(A, B, C, gu, gv):
+    """Rays along +z through every grid point (gu[i], gv[j]) against triangles A, B, C (rows,
+    already in a frame where z is the ray axis) -> (i, j, z, triangle) per hit."""
+    a2, b2, c2 = A[:, :2], B[:, :2], C[:, :2]
+    lo2 = np.minimum(np.minimum(a2, b2), c2)
+    hi2 = np.maximum(np.maximum(a2, b2), c2)
+    i0, i1 = np.searchsorted(gu, lo2[:, 0]), np.searchsorted(gu, hi2[:, 0], "right")
+    j0, j1 = np.searchsorted(gv, lo2[:, 1]), np.searchsorted(gv, hi2[:, 1], "right")
+    nj = np.maximum(j1 - j0, 0)
+    cnt = np.maximum(i1 - i0, 0) * nj
+    tri = np.repeat(np.arange(len(A)), cnt)
+    if len(tri) == 0:
+        e = np.zeros(0, int)
+        return e, e, np.zeros(0), e
+    loc = np.arange(len(tri)) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    ii = i0[tri] + loc // nj[tri]
+    jj = j0[tri] + loc % nj[tri]
+    px, py = gu[ii], gv[jj]
+    a, b, c = a2[tri], b2[tri], c2[tri]
     den = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1])
-    ok = np.abs(den) > 1e-12
-    a, b, c, den = a[ok], b[ok], c[ok], den[ok]
-    A, B, C = A[ok], B[ok], C[ok]
-    out = []
-    for k in range(len(u)):
-        px, py = u[k], v[k]
-        w1 = ((b[:, 1] - c[:, 1]) * (px - c[:, 0]) + (c[:, 0] - b[:, 0]) * (py - c[:, 1])) / den
-        w2 = ((c[:, 1] - a[:, 1]) * (px - c[:, 0]) + (a[:, 0] - c[:, 0]) * (py - c[:, 1])) / den
-        w3 = 1 - w1 - w2
-        hit = (w1 >= 0) & (w2 >= 0) & (w3 >= 0)
-        out.append(np.sort(w1[hit] * A[hit, axis] + w2[hit] * B[hit, axis] + w3[hit] * C[hit, axis]))
-    return out
+    ok = np.abs(den) > 1e-14
+    den = np.where(ok, den, 1.0)
+    w1 = ((b[:, 1] - c[:, 1]) * (px - c[:, 0]) + (c[:, 0] - b[:, 0]) * (py - c[:, 1])) / den
+    w2 = ((c[:, 1] - a[:, 1]) * (px - c[:, 0]) + (a[:, 0] - c[:, 0]) * (py - c[:, 1])) / den
+    w3 = 1 - w1 - w2
+    hit = ok & (w1 >= 0) & (w2 >= 0) & (w3 >= 0)
+    z = w1 * A[tri, 2] + w2 * B[tri, 2] + w3 * C[tri, 2]
+    return ii[hit], jj[hit], z[hit], tri[hit]
 
 
-def mesh_inside_grid(V: np.ndarray, T: np.ndarray, axes: list[np.ndarray]) -> np.ndarray:
-    """Inside/outside of the grid points axes[0] x axes[1] x axes[2] (axis-aligned), by ray
-    parity along x and along y; a point is inside only when both agree."""
-    gx, gy, gz = axes
-    res = np.ones((len(gx), len(gy), len(gz)), bool)
-    # lines along x through every (y, z)
-    yy, zz = np.meshgrid(gy, gz, indexing="ij")
-    cr = _crossings(V, T, 0, yy.ravel(), zz.ravel())
-    for k, (j, l) in enumerate(np.ndindex(len(gy), len(gz))):
-        res[:, j, l] &= (np.searchsorted(cr[k], gx) % 2) == 1
-    xx, zz = np.meshgrid(gx, gz, indexing="ij")
-    cr = _crossings(V, T, 1, xx.ravel(), zz.ravel())
-    for k, (i, l) in enumerate(np.ndindex(len(gx), len(gz))):
-        res[i, :, l] &= (np.searchsorted(cr[k], gy) % 2) == 1
-    return res
-
-
-MESH_MIN_CELL = 0.06     # studs
-MESH_MAX_CELLS = 64      # per axis
-CELLS_ACROSS = 8         # cells across the thinnest side (the wall layer costs about one)
-
-
-def _surface_cells(V: np.ndarray, T: np.ndarray, lo: np.ndarray, step: np.ndarray, n: np.ndarray) -> np.ndarray:
-    """Cells any triangle passes through (sampled densely on each triangle)."""
-    occ = np.zeros(tuple(n), bool)
+def _axis_winding(V, T, axis, g):
+    """Winding number at the grid points g[0] x g[1] x g[2] from rays along +axis: the sum of
+    +1 (leaving) / -1 (entering) over the crossings beyond each point."""
+    o = [d for d in range(3) if d != axis] + [axis]
     A, B, C = V[T[:, 0]], V[T[:, 1]], V[T[:, 2]]
-    edge = np.maximum(np.linalg.norm(B - A, axis=1), np.maximum(np.linalg.norm(C - A, axis=1), np.linalg.norm(C - B, axis=1)))
-    k_all = np.clip(np.ceil(edge / (0.4 * step.min())).astype(int), 1, 200)
-    for k in np.unique(k_all):
-        sel = k_all == k
-        i, j = np.meshgrid(np.arange(k + 1), np.arange(k + 1), indexing="ij")
-        keep = i + j <= k
-        u, v = (i[keep] / k)[None, :, None], (j[keep] / k)[None, :, None]
-        P = A[sel][:, None] + u * (B[sel] - A[sel])[:, None] + v * (C[sel] - A[sel])[:, None]
-        f = (P.reshape(-1, 3) - lo) / step
-        for e in (-1e-6, 1e-6):              # a surface exactly on a cell boundary walls both cells
-            idx = np.clip(np.floor(f + e).astype(int), 0, n - 1)
-            occ[idx[:, 0], idx[:, 1], idx[:, 2]] = True
-    return occ
+    sgn = np.sign(np.cross(B - A, C - A)[:, axis]).astype(np.int32)   # before permuting (axis 1's is odd)
+    A, B, C = A[:, o], B[:, o], C[:, o]
+    ii, jj, z, tri = _grid_ray_hits(A, B, C, g[o[0]], g[o[1]])
+    k = np.searchsorted(g[axis], z)                 # points before the crossing: index < k
+    D = np.zeros((len(g[o[0]]), len(g[o[1]]), len(g[axis]) + 1), np.int32)
+    np.add.at(D, (ii, jj, np.zeros_like(k)), sgn[tri])
+    np.add.at(D, (ii, jj, k), -sgn[tri])
+    W = np.cumsum(D, axis=2)[:, :, :-1]
+    return np.transpose(W, np.argsort(o))
 
 
-def _flood_outside(blocked: np.ndarray) -> np.ndarray:
-    """Cells reachable from the grid's border without crossing `blocked` (6-connected)."""
-    pad = np.pad(blocked, 1, constant_values=False)
-    out = np.zeros_like(pad)
-    out[0, :, :] = out[-1, :, :] = out[:, 0, :] = out[:, -1, :] = out[:, :, 0] = out[:, :, -1] = True
-    out &= ~pad
-    while True:
-        grown = out.copy()
-        grown[1:] |= out[:-1]; grown[:-1] |= out[1:]
-        grown[:, 1:] |= out[:, :-1]; grown[:, :-1] |= out[:, 1:]
-        grown[:, :, 1:] |= out[:, :, :-1]; grown[:, :, :-1] |= out[:, :, 1:]
-        grown &= ~pad
-        if (grown == out).all():
-            return out[1:-1, 1:-1, 1:-1]
-        out = grown
+def winding_inside(V: np.ndarray, T: np.ndarray, g: list[np.ndarray]) -> np.ndarray:
+    """Grid points inside the mesh (winding >= 1 along all three axes)."""
+    ins = np.ones(tuple(len(x) for x in g), bool)
+    for a in range(3):
+        ins &= _axis_winding(V, T, a, g) >= 1
+    return ins
 
 
-def mesh_boxes(V: np.ndarray, T: np.ndarray, margin: float = 0.01, max_boxes: int = 16) -> list[PartSpec]:
-    """Stand-in boxes (axis-aligned, in the mesh's own space) filling a mesh's enclosed volume.
+def points_inside(V: np.ndarray, T: np.ndarray, P: np.ndarray) -> np.ndarray:
+    """The same test for arbitrary points (N, 3)."""
+    A, B, C = V[T[:, 0]], V[T[:, 1]], V[T[:, 2]]
+    ok = np.ones(len(P), bool)
+    for axis in range(3):
+        o = [d for d in range(3) if d != axis]
+        a, b, c = A[:, o], B[:, o], C[:, o]
+        sgn = np.sign(np.cross(B - A, C - A)[:, axis])
+        den = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1])
+        good = np.abs(den) > 1e-14
+        a, b, c, den, sgn = a[good], b[good], c[good], den[good], sgn[good]
+        Az, Bz, Cz = A[good, axis], B[good, axis], C[good, axis]
+        step = max(1, 2_000_000 // max(len(a), 1))
+        for s in range(0, len(P), step):
+            q = P[s:s + step]
+            px, py = q[:, o[0], None], q[:, o[1], None]
+            w1 = ((b[:, 1] - c[:, 1]) * (px - c[:, 0]) + (c[:, 0] - b[:, 0]) * (py - c[:, 1])) / den
+            w2 = ((c[:, 1] - a[:, 1]) * (px - c[:, 0]) + (a[:, 0] - c[:, 0]) * (py - c[:, 1])) / den
+            w3 = 1 - w1 - w2
+            z = w1 * Az + w2 * Bz + w3 * Cz
+            hit = (w1 >= 0) & (w2 >= 0) & (w3 >= 0) & (z > q[:, axis, None])
+            ok[s:s + step] &= (hit * sgn).sum(1) >= 1
+    return ok
 
-    Cells the surface passes through are walls; the outside is flood-filled in from the grid's
-    border; what it can't reach is inside. Works for models made of overlapping closed pieces
-    (where ray parity fails); an open model leaks and gets nothing, rather than a stray box.
-    Inside cells never touch a surface cell's interior, so the boxes stay hidden."""
+
+VOLUME_CELLS = 160                 # grid points along the longest side
+VOLUME_CELL = (0.05, 0.25)         # studs, min and max
+
+
+def volume_cell(V: np.ndarray) -> float:
+    return float(np.clip((V.max(0) - V.min(0)).max() / VOLUME_CELLS, *VOLUME_CELL))
+
+
+def mesh_boxes(V: np.ndarray, T: np.ndarray, margin: float = MARGIN, max_boxes: int = 24) -> list[PartSpec]:
+    """Volume boxes (axis-aligned, in the mesh's own space), largest first."""
     if len(T) == 0:
         return []
+    cell = volume_cell(V)
     lo, hi = V.min(0), V.max(0)
-    ext = hi - lo
-    if ext.min() < 3 * MESH_MIN_CELL:
-        return []
-    cell = max(MESH_MIN_CELL, float(ext.min()) / CELLS_ACROSS, float(ext.max()) / MESH_MAX_CELLS)
-    lo, hi = lo - cell, hi + cell                    # a free border for the flood to start in
-    n = np.minimum(np.maximum(np.ceil((hi - lo) / cell).astype(int), 1), MESH_MAX_CELLS + 2)
+    n = np.maximum(np.ceil((hi - lo) / cell).astype(int), 1)
     step = (hi - lo) / n
-    wall = _surface_cells(V, T, lo, step, n)
-    inside = ~wall & ~_flood_outside(wall)
-    boxes = sorted(_merge_boxes(inside), key=lambda b: -np.prod(b[1] - b[0]))[:max_boxes]
+    jitter = np.array([1.37e-4, 2.71e-4, 3.93e-4])     # keep rays off exact edges
+    g = [lo[d] + jitter[d] + step[d] * np.arange(n[d] + 1) for d in range(3)]
+    ins = winding_inside(V, T, g)
+    occ = (ins[:-1, :-1, :-1] & ins[1:, :-1, :-1] & ins[:-1, 1:, :-1] & ins[:-1, :-1, 1:]
+           & ins[1:, 1:, :-1] & ins[1:, :-1, 1:] & ins[:-1, 1:, 1:] & ins[1:, 1:, 1:])
+    boxes = sorted(_merge_boxes(occ), key=lambda b: -np.prod(b[1] - b[0]))[:max_boxes]
     out = []
     for a, b in boxes:
-        c = lo + step * (a + b) / 2
+        c = lo + jitter + step * (a + b) / 2
         size = step * (b - a) - 2 * margin
         if np.all(size > 0.02):
             out.append(PartSpec("Part", c, size, np.eye(3)))
     return out
 
 
-def part_record(p: PartSpec) -> dict:
-    return dict(cls=p.cls, c=[round(float(x), 5) for x in p.center], s=[round(float(x), 5) for x in p.size],
-                r=[round(float(x), 6) for x in np.asarray(p.rot).flatten()])
+PLATE_ANGLE = np.cos(np.radians(4))   # triangles within this of a region's normal...
+PLATE_PLANE = 0.015                   # ...and this close to its plane (studs) join it
+PLATE_MIN_AREA = 0.25                 # square studs
+PLATE_REGIONS = 60                    # largest flat regions considered
+PLATE_GAP = 0.01                      # plates stay this far from both faces
+PLATE_MAX = 0.25                      # thickest plate
+PLATE_MIN = 0.008
+PLATE_MIN_FACE = 0.08                 # square studs: smaller plates add little shadow
+
+
+def _plane_frame(n: np.ndarray) -> np.ndarray:
+    a = np.array([1.0, 0, 0]) if abs(n[0]) < 0.9 else np.array([0, 1.0, 0])
+    u = np.cross(a, n)
+    u /= np.linalg.norm(u)
+    return np.array([u, np.cross(n, u), n])
+
+
+def mesh_plates(V: np.ndarray, T: np.ndarray, max_plates: int = 150, skip_depth: float = np.inf) -> list[PartSpec]:
+    """Plates (see above), in the mesh's own space, largest first. Regions where the solid is
+    deeper than skip_depth are left to the volume boxes."""
+    if len(T) == 0 or max_plates <= 0:
+        return []
+    A0, B0, C0 = V[T[:, 0]], V[T[:, 1]], V[T[:, 2]]
+    N = np.cross(B0 - A0, C0 - A0)
+    area = np.linalg.norm(N, axis=1) / 2
+    good = area > 1e-8
+    Nn = np.zeros_like(N)
+    Nn[good] = N[good] / (2 * area[good])[:, None]
+    cen = (A0 + B0 + C0) / 3
+    region = -np.ones(len(T), int)
+    regions = []
+    for s in np.argsort(-area):
+        if region[s] >= 0 or not good[s]:
+            continue
+        n, d = Nn[s], float(Nn[s] @ cen[s])
+        m = (region < 0) & good & (Nn @ n > PLATE_ANGLE) & (np.abs(cen @ n - d) < PLATE_PLANE)
+        region[m] = len(regions)
+        regions.append((n, d, float(area[m].sum())))
+    done = np.zeros(len(regions) + 1, bool)          # last slot: "no region"
+    plates = []
+    for ri in np.argsort([-r[2] for r in regions])[:PLATE_REGIONS]:
+        n, d, ar = regions[ri]
+        if ar < PLATE_MIN_AREA:
+            break
+        F = _plane_frame(n)
+        A, B, C = A0 @ F.T, B0 @ F.T, C0 @ F.T
+        sel = region == ri
+        P2 = np.concatenate([A[sel], B[sel], C[sel]])[:, :2]
+        lo, hi = P2.min(0), P2.max(0)
+        h = max(float(np.clip(np.sqrt(ar) / 24, 0.05, 0.2)), float((hi - lo).max()) / 200)
+        nu, nv = np.maximum(np.ceil((hi - lo) / h).astype(int), 1)
+        su, sv = (hi - lo) / [nu, nv]
+        gu = lo[0] + 1.7e-5 + su * np.arange(nu + 1)
+        gv = lo[1] + 2.9e-5 + sv * np.arange(nv + 1)
+        ii, jj, z, tri = _grid_ray_hits(A, B, C, gu, gv)
+        on = sel[tri] & (np.abs(z - d) < 2 * PLATE_PLANE)
+        cov = np.zeros((nu + 1, nv + 1), bool)
+        cov[ii[on], jj[on]] = True
+        # first surface behind the face, per grid point
+        beh = z < d - 1e-4
+        o = np.argsort(-z[beh])
+        ib, jb, zb, tb = ii[beh][o], jj[beh][o], z[beh][o], tri[beh][o]
+        first = np.unique(ib * (nv + 1) + jb, return_index=True)[1]
+        ib, jb, zb, tb = ib[first], jb[first], zb[first], tb[first]
+        backface = Nn[tb] @ n < -0.5
+        depth = np.full((nu + 1, nv + 1), np.inf)
+        depth[ib[backface], jb[backface]] = d - zb[backface]
+        twin = np.zeros((nu + 1, nv + 1), bool)          # the sheet's other face already has plates
+        twin[ib, jb] = done[region[tb]]
+        ok = cov & np.isfinite(depth) & ~twin
+        cell = ok[:-1, :-1] & ok[1:, :-1] & ok[:-1, 1:] & ok[1:, 1:]
+        cdepth = np.minimum(np.minimum(depth[:-1, :-1], depth[1:, :-1]), np.minimum(depth[:-1, 1:], depth[1:, 1:]))
+        th = np.minimum(cdepth - 2 * PLATE_GAP, PLATE_MAX)
+        cell &= (th >= PLATE_MIN) & (cdepth <= skip_depth)
+        if not cell.any():
+            continue
+        done[ri] = True
+        bins = np.where(cell, np.floor(th / 0.02), -1).astype(int)
+        for bval in np.unique(bins[bins >= 0]):
+            thick = max(bval * 0.02, PLATE_MIN)
+            for a, b in _merge_boxes((bins == bval)[:, :, None]):
+                cu = gu[0] + su * (a[0] + b[0]) / 2
+                cv = gv[0] + sv * (a[1] + b[1]) / 2
+                size = np.array([su * (b[0] - a[0]), sv * (b[1] - a[1]), thick])
+                if size[0] > 0.04 and size[1] > 0.04 and size[0] * size[1] >= PLATE_MIN_FACE:
+                    plates.append(PartSpec("Part", np.array([cu, cv, d - PLATE_GAP - thick / 2]) @ F, size, F))
+    plates.sort(key=lambda p: -p.size[0] * p.size[1])
+    plates = plates[:max_plates * 2]
+    # a plate whose corners aren't all inside the solid sits in an open shell (a bin, the back
+    # of a one-sided panel): visible, so dropped
+    if plates:
+        corners = np.array([[x, y, z] for x in (-.45, .45) for y in (-.45, .45) for z in (0.0,)])
+        P = np.concatenate([p.center + (corners * p.size) @ np.asarray(p.rot) for p in plates])
+        ins = points_inside(V, T, P).reshape(len(plates), -1).all(1)
+        plates = [p for p, k in zip(plates, ins) if k]
+    return plates[:max_plates]
+
+
+MODEL_PARTS = 700          # stand-ins per model, shared by all its placements...
+MODEL_PARTS_RANGE = (6, 120)   # ...within these per placement (sp_a1_intro3: about 16k in all)
+
+
+def model_budget(placements: int) -> int:
+    return int(np.clip(MODEL_PARTS / max(placements, 1), *MODEL_PARTS_RANGE))
+
+
+def model_stand_ins(V: np.ndarray, T: np.ndarray, budget: int = 150) -> list[PartSpec]:
+    """Volume boxes for the chunky parts, plates for the thin ones, at most `budget` parts."""
+    boxes = mesh_boxes(V, T, max_boxes=min(24, max(budget // 3, 4)))
+    plates = mesh_plates(V, T, budget - len(boxes), skip_depth=4 * volume_cell(V))
+    return boxes + plates
+
+
+def part_record(p: PartSpec, color=None) -> dict:
+    """color: the surface's average colour, so a stand-in showing through at a distance (depth
+    precision) blends in."""
+    rec = dict(cls=p.cls, c=[round(float(x), 5) for x in p.center], s=[round(float(x), 5) for x in p.size],
+               r=[round(float(x), 6) for x in np.asarray(p.rot).flatten()])
+    if color is not None:
+        rec["col"] = [int(x) for x in color[:3]]
+    return rec

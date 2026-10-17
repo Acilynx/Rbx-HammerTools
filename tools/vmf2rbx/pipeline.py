@@ -296,7 +296,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
                 rec["s"] = [round(float(x), 6) for x in parts[0].size]
                 rep["brush meshes"] += 1
             prop_blobs.update(mblobs)
-            rec["shadow"] = [shadow_mod.part_record(p) for p in stand_ins]
+            rec["shadow"] = [shadow_mod.part_record(p, avg_colors.get(b.dominant_material())) for p in stand_ins]
             parts_out.append(dict(id=b.id, piece=0, cls="Mesh", owner=b.owner, entity=b.entity_name,
                                   mat=(b.disp_sides[0].material if b.disp_sides else b.dominant_material()),
                                   kind=parts[0].kind, faces=[], **rec))
@@ -332,22 +332,29 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             images[f"{m}#{k}"] = arr                  # importer: <image key>#n / #r / #m
     images.update({k: img for k, img in baked.items() if k.split("#")[0] in face_imgs})
 
-    # shadow stand-ins for props, per model, from the volume its opaque submeshes enclose: those
-    # boxes can't poke out of the model. (Not the .phy collision hulls: in sp_a1_intro3 they were
-    # often bigger than the model, covering doorways and showing through, and some came out
-    # rotated. prop_hulls stays available for collision.)
+    # shadow stand-ins for props, per model, inside the solid its opaque submeshes enclose
+    # (volume boxes + thin plates, see shadow.py), so they can't poke out. (Not the .phy
+    # collision hulls: in sp_a1_intro3 they were often bigger than the model, covering doorways
+    # and showing through. prop_hulls stays available for collision.)
     model_shadows = {}
+    placements = Counter(i["model"] for i in prop_instances)
+    say("shadow stand-ins for props")
     for key, subs in prop_geom.items():
-        opaque = [(P, T) for m, P, T in subs if casts_shadow(m)]
-        if not opaque:
+        opaque = [(m, P, T) for m, P, T in subs if casts_shadow(m) and len(T)]
+        if not opaque or key not in placements:
             continue
         V, Ts, base = [], [], 0
-        for P, T in opaque:
+        for _, P, T in opaque:
             V.append(P); Ts.append(T + base); base += len(P)
-        boxes = shadow_mod.mesh_boxes(np.concatenate(V), np.concatenate(Ts))
-        if boxes:
-            model_shadows[key] = [shadow_mod.part_record(p) for p in boxes]
+        parts = shadow_mod.model_stand_ins(np.concatenate(V), np.concatenate(Ts),
+                                           shadow_mod.model_budget(placements[key]))
+        if parts:
+            def area(P, T):
+                return np.linalg.norm(np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]]), axis=1).sum()
+            main = max(opaque, key=lambda s: area(s[1], s[2]))[0]
+            model_shadows[key] = [shadow_mod.part_record(p, avg_colors.get(main)) for p in parts]
             rep["models with shadow stand-ins"] += 1
+            rep["shadow stand-ins (props, all placements)"] += len(parts) * placements[key]
 
     spawn = None
     for e in vmf.entities:

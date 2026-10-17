@@ -562,7 +562,8 @@ function MapImporter.build(contents: string, options: Options?)
 		p.CastShadow = true
 		p.Material = Enum.Material.SmoothPlastic
 		p.TopSurface, p.BottomSurface = Enum.SurfaceType.Smooth, Enum.SurfaceType.Smooth
-		p.Color = Color3.fromRGB(30, 30, 30)
+		-- the surface's average colour: blends in where depth precision lets it show through
+		p.Color = if r.col then Color3.fromRGB(r.col[1], r.col[2], r.col[3]) else Color3.fromRGB(30, 30, 30)
 		p.Size = Vector3.new(r.s[1], r.s[2], r.s[3])
 		local local_ = cframeOf(r.c, r.r)
 		p.CFrame = if cf then cf * local_ else local_
