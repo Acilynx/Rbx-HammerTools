@@ -28,6 +28,8 @@ class BuildOptions:
     rtx_albedo: bool = True            # use the RTX albedo instead of the original texture
     props: bool = True                 # prop_static / prop_dynamic / prop_physics as meshes
     overlays: bool = True              # info_overlay decals as thin parts
+    seal_leaks: bool = True            # hidden light blockers in the void behind walls (see sealing.py)
+    seal_depth: float = 6.0            # studs
     progress: object = None            # callable(str): stage messages, for the converter window
 
 
@@ -362,6 +364,17 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
             spawn = point_to_roblox([float(x) for x in e["origin"].split()]).round(4).tolist()
             break
 
+    blockers = []
+    if opts.seal_leaks:
+        say("light blockers")
+        from .sealing import light_blockers
+        opaque = lambda m: not m.startswith("tools/") and casts_shadow(m)
+        brep = {}
+        blockers = light_blockers(brushes, opaque, light_rep.sun["direction"] if light_rep and light_rep.sun else None,
+                                  opts.seal_depth, brep)
+        for k, v in brep.items():
+            rep[k] += v
+
     meta = dict(
         map=getattr(vmf, "map_name", "") or "",
         studs_per_unit=0.078125,
@@ -383,6 +396,7 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
         models=prop_models,
         model_shadows=model_shadows,
         props=prop_instances,
+        blockers=blockers,
     )
     report = dict(counts=dict(sorted(rep.items())), problems=problems, warnings=warnings,
                   parts=Counter(p["cls"] for p in parts_out),

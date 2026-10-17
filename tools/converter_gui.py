@@ -24,7 +24,7 @@ from tkinter import filedialog, messagebox, ttk        # noqa: E402
 from vmf2rbx import locate                             # noqa: E402
 
 REQUIREMENTS = os.path.join(TOOLS, "requirements.txt")
-NEEDED = "import srctools, numpy, PIL, xxhash, zstandard"
+NEEDED = "import srctools, numpy, scipy, PIL, xxhash, zstandard"
 CHOOSE = "Other game folder..."
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -168,6 +168,7 @@ class App:
         self.out = tk.StringVar()
         self.props = tk.BooleanVar(value=self.cfg.get("props", True))
         self.verify = tk.BooleanVar(value=self.cfg.get("verify", True))
+        self.seal = tk.BooleanVar(value=self.cfg.get("seal", True))
 
         self._row(f, 1, "Map (.vmf)", self.vmf, self.pick_vmf)
         ttk.Label(f, text="Game").grid(row=2, column=0, sticky="w", pady=3)
@@ -184,7 +185,9 @@ class App:
         opts = ttk.Frame(f)
         opts.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Checkbutton(opts, text="Props (models)", variable=self.props).pack(side="left", padx=(0, 16))
-        ttk.Checkbutton(opts, text="Self-check every brush (slower)", variable=self.verify).pack(side="left")
+        ttk.Checkbutton(opts, text="Self-check every brush (slower)", variable=self.verify).pack(side="left", padx=(0, 16))
+        ttk.Checkbutton(opts, text="Block light leaks (hidden walls behind the map)",
+                        variable=self.seal).pack(side="left")
 
         btns = ttk.Frame(f)
         btns.grid(row=9, column=0, columnspan=3, sticky="ew", pady=10)
@@ -327,7 +330,10 @@ class App:
             cmd.append("--no-props")
         if not self.verify.get():
             cmd.append("--no-verify")
-        self.cfg.update(vmf=vmf, game=self.game.get(), props=self.props.get(), verify=self.verify.get())
+        if not self.seal.get():
+            cmd.append("--no-seal")
+        self.cfg.update(vmf=vmf, game=self.game.get(), props=self.props.get(), verify=self.verify.get(),
+                        seal=self.seal.get())
         save_settings(self.cfg)
         self.open_btn.configure(state="disabled")
         self.run(cmd, f"Building {os.path.basename(out)}...", done=lambda ok: self.finished(ok, out))

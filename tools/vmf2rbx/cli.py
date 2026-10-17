@@ -21,6 +21,9 @@ def main(argv=None) -> int:
                    "replaces. Its textures come from --rtxb, or else from loose .dds files next to it")
     b.add_argument("--rtxb", help="Portal RTX textures pulled by tools/rtx_extract.py")
     b.add_argument("--no-props", action="store_true", help="leave out prop_static/dynamic/physics models")
+    b.add_argument("--no-seal", action="store_true",
+                   help="no light blockers (thick hidden walls in the void behind the map, against light leaks)")
+    b.add_argument("--seal-depth", type=float, default=6.0, help="light blocker thickness in studs (default 6)")
     b.add_argument("-o", "--out", required=True)
     b.add_argument("--report", help="also write the build report as JSON")
     r = sub.add_parser("rtx-list", help="list the Portal RTX textures a map needs (input for tools/rtx_extract.py)")
@@ -51,6 +54,7 @@ def main(argv=None) -> int:
     res = build(vmf, fsys, bsp, BuildOptions(region=region, textures=fsys is not None,
                                              lights=bsp is not None, verify=not a.no_verify,
                                              rtx_usda=a.rtx_usda, rtxb=a.rtxb, props=not a.no_props,
+                                             seal_leaks=not a.no_seal, seal_depth=a.seal_depth,
                                              progress=progress))
     progress("writing package")
     import os

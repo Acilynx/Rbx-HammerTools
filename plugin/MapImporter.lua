@@ -741,6 +741,34 @@ function MapImporter.build(contents: string, options: Options?)
 		end
 	end
 
+	-- light blockers: thick opaque boxes in the void behind the map's walls (never seen; Source
+	-- maps are sealed) so the sun's shadows don't leak through thin walls and brush seams.
+	-- Locked, so clicking the map from outside in Studio selects the map, not them.
+	local blockerCount = 0
+	if meta.blockers and #meta.blockers > 0 then
+		local bf = Instance.new("Folder")
+		bf.Name = "LightBlockers"
+		for i, r in ipairs(meta.blockers) do
+			local p = Instance.new("Part")
+			p.Name = "blocker"
+			p.Anchored, p.Locked = true, true
+			p.CanCollide, p.CanQuery, p.CanTouch = false, false, false
+			p.CastShadow = true
+			p.Material = Enum.Material.SmoothPlastic
+			p.TopSurface, p.BottomSurface = Enum.SurfaceType.Smooth, Enum.SurfaceType.Smooth
+			p.Color = Color3.fromRGB(60, 60, 60)
+			p.Size = Vector3.new(r.s[1], r.s[2], r.s[3])
+			p.CFrame = CFrame.new(r.c[1], r.c[2], r.c[3])
+			p.Parent = bf
+			blockerCount += 1
+			if i % 500 == 0 then
+				progress(string.format("light blockers %d/%d", i, #meta.blockers))
+				task.wait()
+			end
+		end
+		bf.Parent = root
+	end
+
 	root.Parent = parent
 
 	if opts.indoorLighting ~= false then
@@ -766,8 +794,8 @@ function MapImporter.build(contents: string, options: Options?)
 
 	progress("refreshing images")
 	local refreshed = MapImporter.refreshImages(root)
-	progress(string.format("done: %d parts, %d brush meshes, %d textures (%d images), %d props, %d lights, %d shadow stand-ins, %d placeholders",
-		counts.parts, counts.meshes, counts.textures, refreshed, counts.props, counts.lights, shadowCount, counts.placeholders))
+	progress(string.format("done: %d parts, %d brush meshes, %d textures (%d images), %d props, %d lights, %d shadow stand-ins, %d light blockers, %d placeholders",
+		counts.parts, counts.meshes, counts.textures, refreshed, counts.props, counts.lights, shadowCount, blockerCount, counts.placeholders))
 	if imageFailures > 0 then
 		warn(string.format("[MapImporter] %d images couldn't be created (EditableImage memory budget?); those maps are missing", imageFailures))
 	end
