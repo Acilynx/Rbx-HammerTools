@@ -354,12 +354,30 @@ def mesh_plates(V: np.ndarray, T: np.ndarray, max_plates: int = 150, skip_depth:
     return plates[:max_plates]
 
 
-MODEL_PARTS = 700          # stand-ins per model, shared by all its placements...
-MODEL_PARTS_RANGE = (6, 120)   # ...within these per placement (sp_a1_intro3: about 16k in all)
+MODEL_MAX_PARTS = 120      # stand-ins generated per model; the map-wide budget picks among them
 
 
-def model_budget(placements: int) -> int:
-    return int(np.clip(MODEL_PARTS / max(placements, 1), *MODEL_PARTS_RANGE))
+def part_area(p: PartSpec) -> float:
+    """A stand-in's shadow-casting size: its largest face."""
+    s = np.sort(np.asarray(p.size))
+    return float(s[1] * s[2])
+
+
+def pick_within_budget(candidates: dict, placements: dict, budget: int) -> dict:
+    """candidates {model: [PartSpec]}, placements {model: count} -> {model: [PartSpec]}.
+
+    Every part is repeated in each placement of its model, so it costs `placements` parts and
+    casts `area x placements` of shadow: shadow per part spent is just its area. So the budget
+    goes to the largest stand-ins map-wide, whatever model they belong to."""
+    pool = sorted(((part_area(p), m, i) for m, ps in candidates.items() for i, p in enumerate(ps)),
+                  key=lambda t: -t[0])
+    used, keep = 0, {}
+    for _, m, i in pool:
+        if used + placements[m] > budget:
+            continue
+        used += placements[m]
+        keep.setdefault(m, []).append(candidates[m][i])
+    return keep
 
 
 def model_stand_ins(V: np.ndarray, T: np.ndarray, budget: int = 150) -> list[PartSpec]:

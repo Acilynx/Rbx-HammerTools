@@ -24,6 +24,8 @@ from tkinter import filedialog, messagebox, ttk        # noqa: E402
 from vmf2rbx import locate                             # noqa: E402
 
 REQUIREMENTS = os.path.join(TOOLS, "requirements.txt")
+# hidden parts that let props cast shadows (EditableMesh parts cast none), map-wide
+SHADOW_PARTS = {"Off": 0, "Low": 1500, "Medium": 4000, "High": 15000}
 NEEDED = "import srctools, numpy, scipy, PIL, xxhash, zstandard"
 CHOOSE = "Other game folder..."
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -169,6 +171,7 @@ class App:
         self.props = tk.BooleanVar(value=self.cfg.get("props", True))
         self.verify = tk.BooleanVar(value=self.cfg.get("verify", True))
         self.seal = tk.BooleanVar(value=self.cfg.get("seal", True))
+        self.shadows = tk.StringVar(value=self.cfg.get("shadows", "Medium"))
 
         self._row(f, 1, "Map (.vmf)", self.vmf, self.pick_vmf)
         ttk.Label(f, text="Game").grid(row=2, column=0, sticky="w", pady=3)
@@ -183,11 +186,16 @@ class App:
         self._row(f, 6, "Save as (.htmp)", self.out, self.pick_out)
 
         opts = ttk.Frame(f)
-        opts.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        opts.grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        opts2 = ttk.Frame(f)
+        opts2.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
         ttk.Checkbutton(opts, text="Props (models)", variable=self.props).pack(side="left", padx=(0, 16))
-        ttk.Checkbutton(opts, text="Self-check every brush (slower)", variable=self.verify).pack(side="left", padx=(0, 16))
-        ttk.Checkbutton(opts, text="Block light leaks (hidden walls behind the map)",
-                        variable=self.seal).pack(side="left")
+        ttk.Checkbutton(opts, text="Self-check every brush (slower)", variable=self.verify).pack(side="left")
+        ttk.Checkbutton(opts2, text="Block light leaks (hidden walls behind the map)",
+                        variable=self.seal).pack(side="left", padx=(0, 16))
+        ttk.Label(opts2, text="Prop shadows").pack(side="left", padx=(0, 4))
+        ttk.Combobox(opts2, textvariable=self.shadows, state="readonly", width=8,
+                     values=list(SHADOW_PARTS)).pack(side="left")
 
         btns = ttk.Frame(f)
         btns.grid(row=9, column=0, columnspan=3, sticky="ew", pady=10)
@@ -332,8 +340,9 @@ class App:
             cmd.append("--no-verify")
         if not self.seal.get():
             cmd.append("--no-seal")
+        cmd += ["--prop-shadow-parts", str(SHADOW_PARTS.get(self.shadows.get(), 4000))]
         self.cfg.update(vmf=vmf, game=self.game.get(), props=self.props.get(), verify=self.verify.get(),
-                        seal=self.seal.get())
+                        seal=self.seal.get(), shadows=self.shadows.get())
         save_settings(self.cfg)
         self.open_btn.configure(state="disabled")
         self.run(cmd, f"Building {os.path.basename(out)}...", done=lambda ok: self.finished(ok, out))

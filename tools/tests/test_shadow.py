@@ -93,3 +93,15 @@ def test_open_box_gets_no_plates_inside_it():
     top = [i for i, t in enumerate(T) if np.allclose(V[t][:, 1], 2)]
     T = np.delete(T, top, axis=0)
     assert model_stand_ins(V, T) == []
+
+
+def test_budget_goes_to_the_largest_stand_ins_map_wide():
+    from vmf2rbx.shadow import pick_within_budget
+    big = PartSpec("Part", np.zeros(3), np.array([4.0, 4, 0.1]), np.eye(3))
+    small = PartSpec("Part", np.zeros(3), np.array([1.0, 1, 0.1]), np.eye(3))
+    cands = {"wall": [big, small], "beam": [small, small]}
+    places = {"wall": 2, "beam": 10}
+    keep = pick_within_budget(cands, places, budget=4)
+    # the wall's big plate (2 parts) fits, and its small one (2 more); the beam's (10 each) don't
+    assert keep == {"wall": [big, small]}
+    assert pick_within_budget(cands, places, 0) == {}

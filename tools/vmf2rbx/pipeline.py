@@ -28,6 +28,7 @@ class BuildOptions:
     rtx_albedo: bool = True            # use the RTX albedo instead of the original texture
     props: bool = True                 # prop_static / prop_dynamic / prop_physics as meshes
     overlays: bool = True              # info_overlay decals as thin parts
+    prop_shadow_parts: int = 4000      # shadow stand-ins for props, map-wide (0 = none; see shadow.py)
     seal_leaks: bool = True            # hidden light blockers in the void behind walls (see sealing.py)
     seal_depth: float = 6.0            # studs
     progress: object = None            # callable(str): stage messages, for the converter window
@@ -340,21 +341,25 @@ def build(vmf, fsys=None, bsp_bytes: bytes | None = None, opts: BuildOptions = B
     # and showing through. prop_hulls stays available for collision.)
     model_shadows = {}
     placements = Counter(i["model"] for i in prop_instances)
-    say("shadow stand-ins for props")
-    for key, subs in prop_geom.items():
-        opaque = [(m, P, T) for m, P, T in subs if casts_shadow(m) and len(T)]
-        if not opaque or key not in placements:
-            continue
-        V, Ts, base = [], [], 0
-        for _, P, T in opaque:
-            V.append(P); Ts.append(T + base); base += len(P)
-        parts = shadow_mod.model_stand_ins(np.concatenate(V), np.concatenate(Ts),
-                                           shadow_mod.model_budget(placements[key]))
-        if parts:
-            def area(P, T):
-                return np.linalg.norm(np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]]), axis=1).sum()
-            main = max(opaque, key=lambda s: area(s[1], s[2]))[0]
-            model_shadows[key] = [shadow_mod.part_record(p, avg_colors.get(main)) for p in parts]
+    if opts.prop_shadow_parts > 0:
+        say("shadow stand-ins for props")
+        candidates, main_mat = {}, {}
+        for key, subs in prop_geom.items():
+            opaque = [(m, P, T) for m, P, T in subs if casts_shadow(m) and len(T)]
+            if not opaque or key not in placements:
+                continue
+            V, Ts, base = [], [], 0
+            for _, P, T in opaque:
+                V.append(P); Ts.append(T + base); base += len(P)
+            parts = shadow_mod.model_stand_ins(np.concatenate(V), np.concatenate(Ts), shadow_mod.MODEL_MAX_PARTS)
+            if parts:
+                def area(P, T):
+                    return np.linalg.norm(np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]]), axis=1).sum()
+                candidates[key] = parts
+                main_mat[key] = max(opaque, key=lambda s: area(s[1], s[2]))[0]
+        # one map-wide budget (every stand-in repeats in each placement of its model)
+        for key, parts in shadow_mod.pick_within_budget(candidates, placements, opts.prop_shadow_parts).items():
+            model_shadows[key] = [shadow_mod.part_record(p, avg_colors.get(main_mat[key])) for p in parts]
             rep["models with shadow stand-ins"] += 1
             rep["shadow stand-ins (props, all placements)"] += len(parts) * placements[key]
 

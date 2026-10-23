@@ -97,32 +97,48 @@ def _march(start: np.ndarray, dirs: np.ndarray, lo, n, stop: np.ndarray, mark: n
             alive[a[hit]] = False
 
 
+_AXIS_ORDERS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+
+
+def _grow(free: np.ndarray, seed, order) -> tuple[list[int], list[int]]:
+    """The box from `seed` grown through free cells, one axis at a time (both ways), in `order`."""
+    lo, hi = list(seed), [x + 1 for x in seed]
+    n = free.shape
+    for ax in order:
+        while lo[ax] > 0:
+            sl = [slice(lo[d], hi[d]) for d in range(3)]
+            sl[ax] = slice(lo[ax] - 1, lo[ax])
+            if not free[tuple(sl)].all():
+                break
+            lo[ax] -= 1
+        while hi[ax] < n[ax]:
+            sl = [slice(lo[d], hi[d]) for d in range(3)]
+            sl[ax] = slice(hi[ax], hi[ax] + 1)
+            if not free[tuple(sl)].all():
+                break
+            hi[ax] += 1
+    return lo, hi
+
+
 def _cover_boxes(need: np.ndarray, free: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
     """Greedy boxes over `free` cells covering every `need` cell (need must be within free):
-    boxes grow through any free cell, so few large boxes do the job."""
+    boxes grow through any free cell, so few large boxes do the job. Each box is grown in all
+    six axis orders and the one covering the most still-uncovered cells is kept (about a third
+    fewer boxes than one fixed order on sp_a1_intro3)."""
     need = need.copy()
-    nx, ny, nz = need.shape
     out = []
-    for i, j, k in zip(*np.nonzero(need)):
-        if not need[i, j, k]:
+    for seed in zip(*np.nonzero(need)):
+        if not need[seed]:
             continue
-        i1, i2 = i, i + 1
-        while i1 > 0 and free[i1 - 1, j, k]:
-            i1 -= 1
-        while i2 < nx and free[i2, j, k]:
-            i2 += 1
-        j1, j2 = j, j + 1
-        while j1 > 0 and free[i1:i2, j1 - 1, k].all():
-            j1 -= 1
-        while j2 < ny and free[i1:i2, j2, k].all():
-            j2 += 1
-        k1, k2 = k, k + 1
-        while k1 > 0 and free[i1:i2, j1:j2, k1 - 1].all():
-            k1 -= 1
-        while k2 < nz and free[i1:i2, j1:j2, k2].all():
-            k2 += 1
-        need[i1:i2, j1:j2, k1:k2] = False
-        out.append((np.array([i1, j1, k1]), np.array([i2, j2, k2])))
+        best = None
+        for order in _AXIS_ORDERS:
+            lo, hi = _grow(free, seed, order)
+            gain = int(need[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]].sum())
+            if best is None or gain > best[0]:
+                best = (gain, lo, hi)
+        _, lo, hi = best
+        need[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = False
+        out.append((np.array(lo), np.array(hi)))
     return out
 
 
@@ -255,5 +271,5 @@ def light_blockers(brushes: list[Brush], opaque, sun_dir=None, depth: float = 6.
                         s=[round(float(x), 4) for x in np.abs(to_roblox(size_src)) * SPU]))
     rep["light blockers"] = len(out)
     if debug is not None:
-        debug.update(solid=solid, sky=skyc, void=void, seen=seen, block=block, lo=lo)
+        debug.update(solid=solid, sky=skyc, void=void, seen=seen, block=block, free=free, lo=lo)
     return out
