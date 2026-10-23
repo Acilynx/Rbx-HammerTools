@@ -14,6 +14,56 @@ local HttpService = game:GetService("HttpService")
 
 local MapImporter = {}
 
+-- ------------------------------------------------------------------ what this thread may set
+--
+-- Measured in a playtest: a LocalScript can't set a Texture's PBR maps (RoughnessMapContent:
+-- "lacking capability Plugin"), and SurfaceAppearance maps are plugin-only too. So when the
+-- map is built at runtime (Embed for playtest), faces get their colour image only and props use
+-- MeshPart.TextureContent instead of a SurfaceAppearance.
+
+local function canWrite(className: string, prop: string): boolean
+	local ok = pcall(function()
+		local i = Instance.new(className)
+		;(i :: any)[prop] = Content.none
+		i:Destroy()
+	end)
+	return ok
+end
+
+-- In a playtest, EditableImages/EditableMeshes don't replicate, and a client may only hold a few
+-- (measured in Studio: about 80 MB of images and 7 meshes). The server has no such limit and
+-- may set every map, so the playtest loader builds there, with `replicate` on: each image and
+-- mesh is turned into DataModel content (AssetService:CreateDataModelContentAsync), which does
+-- replicate. That content lasts for the session only (made in edit mode, it's gone in the
+-- playtest), so it's only used at runtime.
+local replicateMode = false
+local dmcCache: { [Instance]: Content } = setmetatable({}, { __mode = "k" }) :: any
+local function asContent(obj: Instance): Content
+	if not replicateMode then
+		return Content.fromObject(obj)
+	end
+	local c = dmcCache[obj]
+	if c then
+		return c
+	end
+	local ok, result, content = pcall(function()
+		return AssetService:CreateDataModelContentAsync(Content.fromObject(obj))
+	end)
+	if ok and result == Enum.CreateContentResult.Success then
+		dmcCache[obj] = content
+		return content
+	end
+	warn("[MapImporter] couldn't make replicating content: " .. tostring(if ok then result else result))
+	return Content.fromObject(obj)
+end
+
+local caps = { pbr = true, appearance = true }
+local function probeCapabilities()
+	caps.pbr = canWrite("Texture", "RoughnessMapContent")
+	caps.appearance = canWrite("SurfaceAppearance", "ColorMapContent")
+end
+
+
 export type Options = {
 	parent: Instance?,          -- default: workspace.Map
 	moveSpawn: boolean?,        -- move/hide the first SpawnLocation onto info_player_start (default true)
@@ -21,6 +71,7 @@ export type Options = {
 	indoorLighting: boolean?,   -- set up Lighting (default true): the map's sun if it has one, else no sun or sky light, dim ambient
 	matte: boolean?,            -- give textures a flat full-roughness map so they don't read as glossy (default true)
 	glassTransparency: number?, -- Transparency of Refract-shader glass such as observation windows (default 0.75)
+	replicate: boolean?,        -- runtime build on the server: images/meshes become replicating content
 	onProgress: ((string) -> ())?,
 }
 
@@ -219,13 +270,14 @@ function MapImporter.refreshImages(root: Instance): number
 	local textureUsers: { [EditableImage]: { { any } } } = {}
 	local appearances: { SurfaceAppearance } = {}
 	local all: { [EditableImage]: boolean } = {}
+	local props = if caps.pbr then MAP_PROPS else { "ColorMapContent" }
 	for _, t in ipairs(root:GetDescendants()) do
-		local isTex, isSA = t:IsA("Texture"), t:IsA("SurfaceAppearance")
+		local isTex, isSA = t:IsA("Texture"), t:IsA("SurfaceAppearance") and caps.appearance
 		if isTex or isSA then
 			if isSA then
 				table.insert(appearances, t)
 			end
-			for _, prop in ipairs(MAP_PROPS) do
+			for _, prop in ipairs(props) do
 				local img = (t :: any)[prop].Object
 				if img and img:IsA("EditableImage") then
 					all[img] = true
@@ -388,6 +440,12 @@ function MapImporter.build(contents: string, options: Options?)
 	local opts = options or {}
 	local progress = opts.onProgress or function(_: string) end
 	local meta, data, blob0 = readPackage(contents)
+	replicateMode = opts.replicate == true
+	table.clear(dmcCache)
+	probeCapabilities()
+	if not caps.pbr then
+		progress("running without plugin rights: colour textures only (no PBR maps, no SurfaceAppearances)")
+	end
 
 	local parent = opts.parent
 	if not parent then
@@ -439,6 +497,9 @@ function MapImporter.build(contents: string, options: Options?)
 	-- lightmapped surfaces have no specular unless the material asks for an envmap, and a
 	-- part's default roughness makes every texture look polished.
 	local function pbrFor(key: string, mat: string, swap: boolean, fx: boolean, fy: boolean, face: string?)
+		if not caps.pbr then
+			return nil, nil, nil, nil, 1
+		end
 		local consts = (meta.materials[mat] or {}).pbr or {}
 		local n = variantFor(key .. "#n", swap, fx, fy, face == "Bottom")
 		local r = variantFor(key .. "#r", swap, fx, fy)
@@ -532,13 +593,13 @@ function MapImporter.build(contents: string, options: Options?)
 					t.Face = (Enum.NormalId :: any)[face]
 					t.StudsPerTileU, t.StudsPerTileV = su, sv
 					t.OffsetStudsU, t.OffsetStudsV = ou, ov
-					t.ColorMapContent = Content.fromObject(img)
+					t.ColorMapContent = asContent(img)
 					local nImg, rImg, mImg, eImg, eStrength = pbrFor(imgKey or mat, mat, swap, fx, fy, face)
-					if nImg then t.NormalMapContent = Content.fromObject(nImg) end
-					if rImg then t.RoughnessMapContent = Content.fromObject(rImg) end
-					if mImg then t.MetalnessMapContent = Content.fromObject(mImg) end
+					if nImg then t.NormalMapContent = asContent(nImg) end
+					if rImg then t.RoughnessMapContent = asContent(rImg) end
+					if mImg then t.MetalnessMapContent = asContent(mImg) end
 					if eImg then
-						t.EmissiveMaskContent = Content.fromObject(eImg)
+						t.EmissiveMaskContent = asContent(eImg)
 						t.EmissiveStrength = eStrength
 					end
 					t.Parent = p
@@ -642,7 +703,7 @@ function MapImporter.build(contents: string, options: Options?)
 			local em = b and buildMesh(readBlob(data, blob0, b), sm.n, sm.m)
 			if em then
 				local ok, mp = pcall(function()
-					return AssetService:CreateMeshPartAsync(Content.fromObject(em), {
+					return AssetService:CreateMeshPartAsync(asContent(em), {
 						CollisionFidelity = if not solid then Enum.CollisionFidelity.Box
 							else fidelity or Enum.CollisionFidelity.Default,
 					})
@@ -654,15 +715,25 @@ function MapImporter.build(contents: string, options: Options?)
 					mp.Color = colorOf(meta, sm.material)
 					mp:SetAttribute("SourceMaterial", sm.material)
 					local img = variantFor(sm.material, false, false, false)
-					if img then
+					local mmat = meta.materials[sm.material]
+					if img and not caps.appearance then
+						-- runtime build: the plain MeshPart texture (no PBR, no tint)
+						if not (mmat and mmat.texlight and opts.texlightsAsNeon ~= false) then
+							mp.TextureContent = asContent(img)
+							if mmat and mmat.alpha then
+								if mmat.blend then mp.Transparency = 0.02 end
+								mp.CastShadow = false
+							end
+						end
+					elseif img then
 						local sa = Instance.new("SurfaceAppearance")
-						sa.ColorMapContent = Content.fromObject(img)
+						sa.ColorMapContent = asContent(img)
 						local nImg, rImg, mImg, eImg, eStrength = pbrFor(sm.material, sm.material, false, false, false)
-						if nImg then sa.NormalMapContent = Content.fromObject(nImg) end
-						if rImg then sa.RoughnessMapContent = Content.fromObject(rImg) end
-						if mImg then sa.MetalnessMapContent = Content.fromObject(mImg) end
+						if nImg then sa.NormalMapContent = asContent(nImg) end
+						if rImg then sa.RoughnessMapContent = asContent(rImg) end
+						if mImg then sa.MetalnessMapContent = asContent(mImg) end
 						if eImg then
-							sa.EmissiveMaskContent = Content.fromObject(eImg)
+							sa.EmissiveMaskContent = asContent(eImg)
 							sa.EmissiveStrength = eStrength
 						end
 						local mm = meta.materials[sm.material]
@@ -849,7 +920,19 @@ function MapImporter.build(contents: string, options: Options?)
 	end
 
 	progress("refreshing images")
-	local refreshed = MapImporter.refreshImages(root)
+	-- (replicating content is a static copy: nothing to redraw, and the editables can go)
+	local refreshed = 0
+	if replicateMode then
+		for obj in pairs(dmcCache) do
+			obj:Destroy()
+			refreshed += 1
+		end
+		table.clear(dmcCache)
+		table.clear(flatCache)
+		replicateMode = false
+	else
+		refreshed = MapImporter.refreshImages(root)
+	end
 	progress(string.format("done: %d parts, %d brush meshes, %d textures (%d images), %d props, %d lights, %d shadow stand-ins, %d light blockers, %d placeholders",
 		counts.parts, counts.meshes, counts.textures, refreshed, counts.props, counts.lights, shadowCount, blockerCount, counts.placeholders))
 	if imageFailures > 0 then
