@@ -100,7 +100,7 @@ end)
 -- in StringValues), with a copy of MapImporter and a LocalScript that builds it on Play.
 -- Studio playtests only: publishing the place would put the map's (Valve) textures on Roblox.
 
-local CHUNK = 200000 -- StringValue.Value limit, in characters
+local CHUNK = 199000 -- StringValue.Value must stay under 200,000 characters
 
 local LOADER_SOURCE = [==[
 -- HammerPlaytestLoader: made by Hammer Tools "Embed for playtest". Builds the embedded map on
