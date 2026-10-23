@@ -172,6 +172,7 @@ class App:
         self.verify = tk.BooleanVar(value=self.cfg.get("verify", True))
         self.seal = tk.BooleanVar(value=self.cfg.get("seal", True))
         self.shadows = tk.StringVar(value=self.cfg.get("shadows", "Medium"))
+        self.playtest = tk.BooleanVar(value=False)
 
         self._row(f, 1, "Map (.vmf)", self.vmf, self.pick_vmf)
         ttk.Label(f, text="Game").grid(row=2, column=0, sticky="w", pady=3)
@@ -190,7 +191,9 @@ class App:
         opts2 = ttk.Frame(f)
         opts2.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
         ttk.Checkbutton(opts, text="Props (models)", variable=self.props).pack(side="left", padx=(0, 16))
-        ttk.Checkbutton(opts, text="Self-check every brush (slower)", variable=self.verify).pack(side="left")
+        ttk.Checkbutton(opts, text="Self-check every brush (slower)", variable=self.verify).pack(side="left", padx=(0, 16))
+        ttk.Checkbutton(opts, text="Playtest package (small textures)",
+                        variable=self.playtest, command=self.on_playtest).pack(side="left")
         ttk.Checkbutton(opts2, text="Block light leaks (hidden walls behind the map)",
                         variable=self.seal).pack(side="left", padx=(0, 16))
         ttk.Label(opts2, text="Prop shadows").pack(side="left", padx=(0, 4))
@@ -295,6 +298,17 @@ class App:
         if p:
             self.out.set(os.path.normpath(p))
 
+    def on_playtest(self):
+        """Suggest <map>_playtest.htmp, so the full package isn't overwritten."""
+        out = self.out.get()
+        if not out:
+            return
+        stem, ext = os.path.splitext(out)
+        if self.playtest.get() and not stem.endswith("_playtest"):
+            self.out.set(stem + "_playtest" + ext)
+        elif not self.playtest.get() and stem.endswith("_playtest"):
+            self.out.set(stem[: -len("_playtest")] + ext)
+
     # ------------------------------------------------------------------ running things
     def check_packages(self):
         if os.environ.get("VMF2RBX_PYTHON"):
@@ -341,6 +355,8 @@ class App:
         if not self.seal.get():
             cmd.append("--no-seal")
         cmd += ["--prop-shadow-parts", str(SHADOW_PARTS.get(self.shadows.get(), 4000))]
+        if self.playtest.get():
+            cmd.append("--playtest")
         self.cfg.update(vmf=vmf, game=self.game.get(), props=self.props.get(), verify=self.verify.get(),
                         seal=self.seal.get(), shadows=self.shadows.get())
         save_settings(self.cfg)

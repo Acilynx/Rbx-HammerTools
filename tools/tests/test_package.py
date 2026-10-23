@@ -39,3 +39,16 @@ def test_data_maps_are_zstd(tmp_path):
         i = by[name]
         raw = zstandard.ZstdDecompressor().decompress(blob[i["off"]: i["off"] + i["len"]])
         assert raw == arr.tobytes()
+
+
+def test_compact_images_caps_size_and_drops_pbr():
+    import numpy as np
+    from PIL import Image
+    from vmf2rbx.package import compact_images
+    imgs = {"a": Image.new("RGB", (1024, 512)), "a#n": np.zeros((1024, 1024, 2), np.uint8),
+            "a#e": np.zeros((512, 512), np.uint8), "b": Image.new("RGB", (128, 128))}
+    out = compact_images(imgs, 256)
+    assert set(out) == {"a", "a#e", "b"}
+    assert out["a"].size == (256, 128) and out["a#e"].shape == (256, 256) and out["b"].size == (128, 128)
+    kept = compact_images(imgs, 256, keep_pbr=True)
+    assert kept["a#n"].shape == (256, 256, 2)

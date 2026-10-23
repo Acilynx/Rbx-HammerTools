@@ -1,6 +1,7 @@
 """Map package (.htmp): everything the Studio importer needs, in one file.
 
-Layout:  b"HTMP" | u32 json_length | json (utf-8) | blob
+Layout:  b"HTMZ" | u32 json_length | zstd(json, utf-8) | blob
+         (b"HTMP" | u32 json_length | json | blob: older packages, still read)
 
 Images (meta["images"], each at blob offset `off`, `len` bytes):
 * colour (a PIL image): enc "palz", palettized to <=256 colours: palette (ncol * RGBA), then one
@@ -21,7 +22,8 @@ import struct
 
 from PIL import Image
 
-MAGIC = b"HTMP"
+MAGIC = b"HTMZ"            # json zstd-compressed (it's mostly numbers: 1.6 MB -> 0.16 MB on sp_a1_intro3)
+MAGIC_PLAIN = b"HTMP"
 VERSION = 2
 
 
@@ -95,7 +97,8 @@ def write_package(path: str, meta: dict, images: dict[str, Image.Image], blobs: 
         blob_meta.append(dict(name=name, off=len(blob), len=len(data), size=len(raw)))
         blob += data
     meta = dict(meta, version=VERSION, images=mats, blobs=blob_meta)
-    js = json.dumps(meta, separators=(",", ":")).encode()
+    import zstandard
+    js = zstandard.ZstdCompressor(level=19).compress(json.dumps(meta, separators=(",", ":")).encode())
     out = MAGIC + struct.pack("<I", len(js)) + js + bytes(blob)
     with open(path, "wb") as fh:
         fh.write(out)
@@ -105,6 +108,42 @@ def write_package(path: str, meta: dict, images: dict[str, Image.Image], blobs: 
 def read_package(path: str) -> tuple[dict, bytes]:
     with open(path, "rb") as fh:
         data = fh.read()
-    assert data[:4] == MAGIC, "not a map package"
+    assert data[:4] in (MAGIC, MAGIC_PLAIN), "not a map package"
     (n,) = struct.unpack_from("<I", data, 4)
-    return json.loads(data[8:8 + n]), data[8 + n:]
+    js = data[8:8 + n]
+    if data[:4] == MAGIC:
+        import zstandard
+        js = zstandard.ZstdDecompressor().decompress(js, max_output_size=1 << 30)
+    return json.loads(js), data[8 + n:]
+
+
+PBR_KEYS = ("#n", "#r", "#m")
+
+
+def compact_images(images: dict, max_px: int, keep_pbr: bool = False) -> dict:
+    """Smaller images for a playtest package (the whole package is stored in the place):
+    longest side at most max_px, and no Remix normal/roughness/metalness maps unless keep_pbr.
+    Texture tiling doesn't change: it comes from the original texel size, not the image's."""
+    import numpy as np
+    out = {}
+    for name, img in images.items():
+        if not keep_pbr and name.endswith(PBR_KEYS):
+            continue
+        pil = img if isinstance(img, Image.Image) else None
+        if pil is None:                                   # data map (H x W [x ch] uint8)
+            a = np.asarray(img, np.uint8)
+            if max(a.shape[:2]) <= max_px:
+                out[name] = img
+                continue
+            k = max_px / max(a.shape[:2])
+            size = (max(1, round(a.shape[1] * k)), max(1, round(a.shape[0] * k)))
+            chans = [a] if a.ndim == 2 else [a[..., c] for c in range(a.shape[2])]
+            res = [np.asarray(Image.fromarray(c).resize(size, Image.Resampling.LANCZOS)) for c in chans]
+            out[name] = res[0] if a.ndim == 2 else np.stack(res, -1)
+        elif max(pil.size) > max_px:
+            k = max_px / max(pil.size)
+            out[name] = pil.resize((max(1, round(pil.width * k)), max(1, round(pil.height * k))),
+                                   Image.Resampling.LANCZOS)
+        else:
+            out[name] = pil
+    return out

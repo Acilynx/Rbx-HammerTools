@@ -40,9 +40,18 @@ local NORMALS: { [Enum.NormalId]: Vector3 } = {
 
 local function readPackage(contents: string)
 	local data = buffer.fromstring(contents)
-	assert(buffer.readstring(data, 0, 4) == "HTMP", "not a map package (.htmp)")
+	local magic = buffer.readstring(data, 0, 4)
+	assert(magic == "HTMZ" or magic == "HTMP", "not a map package (.htmp)")
 	local jlen = buffer.readu32(data, 4)
-	local meta = HttpService:JSONDecode(buffer.readstring(data, 8, jlen))
+	local json
+	if magic == "HTMZ" then -- the JSON part is zstd-compressed
+		local packed = buffer.create(jlen)
+		buffer.copy(packed, 0, data, 8, jlen)
+		json = buffer.tostring(EncodingService:DecompressBuffer(packed, Enum.CompressionAlgorithm.Zstd))
+	else
+		json = buffer.readstring(data, 8, jlen)
+	end
+	local meta = HttpService:JSONDecode(json)
 	assert(meta.version == 1 or meta.version == 2, "unsupported package version " .. tostring(meta.version))
 	return meta, data, 8 + jlen
 end
@@ -327,6 +336,53 @@ function MapImporter.setupSunLighting(sun)
 end
 
 -- ------------------------------------------------------------------ build
+
+-- ------------------------------------------------------------------ base64
+--
+-- A package embedded in the place for playtests is stored as text in StringValues (at most
+-- 200,000 characters each). StringValues are meant for text, so the bytes go in as base64
+-- (4 characters per 3 bytes) rather than raw.
+
+local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64_DEC = table.create(256, 0)
+for i = 1, 64 do B64_DEC[string.byte(B64, i) + 1] = i - 1 end
+
+function MapImporter.base64Encode(data: buffer): string
+	local n = buffer.len(data)
+	local out = buffer.create(math.ceil(n / 3) * 4)
+	local o = 0
+	for i = 0, n - 1, 3 do
+		local b0 = buffer.readu8(data, i)
+		local b1 = if i + 1 < n then buffer.readu8(data, i + 1) else 0
+		local b2 = if i + 2 < n then buffer.readu8(data, i + 2) else 0
+		local v = b0 * 65536 + b1 * 256 + b2
+		buffer.writeu8(out, o, string.byte(B64, (v // 262144) % 64 + 1))
+		buffer.writeu8(out, o + 1, string.byte(B64, (v // 4096) % 64 + 1))
+		buffer.writeu8(out, o + 2, if i + 1 < n then string.byte(B64, (v // 64) % 64 + 1) else 61) -- "="
+		buffer.writeu8(out, o + 3, if i + 2 < n then string.byte(B64, v % 64 + 1) else 61)
+		o += 4
+	end
+	return buffer.tostring(out)
+end
+
+function MapImporter.base64Decode(text: string): buffer
+	local src = buffer.fromstring(text)
+	local n = buffer.len(src)
+	local pad = (if n > 0 and buffer.readu8(src, n - 1) == 61 then 1 else 0)
+		+ (if n > 1 and buffer.readu8(src, n - 2) == 61 then 1 else 0)
+	local out = buffer.create(n // 4 * 3 - pad)
+	local outLen = buffer.len(out)
+	local o = 0
+	for i = 0, n - 4, 4 do
+		local v = B64_DEC[buffer.readu8(src, i) + 1] * 262144 + B64_DEC[buffer.readu8(src, i + 1) + 1] * 4096
+			+ B64_DEC[buffer.readu8(src, i + 2) + 1] * 64 + B64_DEC[buffer.readu8(src, i + 3) + 1]
+		buffer.writeu8(out, o, v // 65536)
+		if o + 1 < outLen then buffer.writeu8(out, o + 1, (v // 256) % 256) end
+		if o + 2 < outLen then buffer.writeu8(out, o + 2, v % 256) end
+		o += 3
+	end
+	return out
+end
 
 function MapImporter.build(contents: string, options: Options?)
 	local opts = options or {}

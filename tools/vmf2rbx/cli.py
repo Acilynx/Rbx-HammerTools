@@ -23,6 +23,10 @@ def main(argv=None) -> int:
     b.add_argument("--no-props", action="store_true", help="leave out prop_static/dynamic/physics models")
     b.add_argument("--prop-shadow-parts", type=int, default=4000,
                    help="hidden shadow-casting parts for props, map-wide (default 4000; 0 = none)")
+    b.add_argument("--playtest", action="store_true",
+                   help="small package for playtesting (the plugin stores it in the place): textures at most "
+                        "--max-image px (default 256 here), no Remix normal/roughness/metal maps")
+    b.add_argument("--max-image", type=int, help="longest texture side in pixels (default 1024, or 256 with --playtest)")
     b.add_argument("--no-seal", action="store_true",
                    help="no light blockers (thick hidden walls in the void behind the map, against light leaks)")
     b.add_argument("--seal-depth", type=float, default=6.0, help="light blocker thickness in studs (default 6)")
@@ -59,6 +63,9 @@ def main(argv=None) -> int:
                                              seal_leaks=not a.no_seal, seal_depth=a.seal_depth,
                                              prop_shadow_parts=a.prop_shadow_parts,
                                              progress=progress))
+    if a.playtest or a.max_image:
+        from .package import compact_images
+        res.images = compact_images(res.images, a.max_image or (256 if a.playtest else 1024), keep_pbr=not a.playtest)
     progress("writing package")
     import os
     res.meta["map"] = os.path.splitext(os.path.basename(a.vmf))[0].removesuffix("_d")

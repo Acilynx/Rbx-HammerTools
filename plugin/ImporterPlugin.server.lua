@@ -67,6 +67,9 @@ local importButton = toolbar:CreateButton("Import map", "Build a .htmp map packa
 importButton.ClickableWhenViewportHidden = true
 local refreshButton = toolbar:CreateButton("Refresh textures", "Redraw imported map textures (if they've gone blank)", "")
 refreshButton.ClickableWhenViewportHidden = true
+local embedButton = toolbar:CreateButton("Embed for playtest",
+	"Store a map package in the place so a playtest (Play) builds it with textures and props", "")
+embedButton.ClickableWhenViewportHidden = true
 
 importButton.Click:Connect(function()
 	local file = StudioService:PromptImportFileAsync({ "htmp" })
@@ -87,6 +90,107 @@ importButton.Click:Connect(function()
 		warn("[MapImporter] " .. tostring(err))
 	end
 	importButton:SetActive(false)
+end)
+
+-- ------------------------------------------------------------------ playtest embedding
+--
+-- Textures and prop meshes are EditableImages/EditableMeshes: they exist only in this Studio
+-- session, and a playtest doesn't get them. So for a playtest the client rebuilds the map
+-- itself: the package goes into the place (ReplicatedStorage.HammerPlaytest, as base64 text
+-- in StringValues), with a copy of MapImporter and a LocalScript that builds it on Play.
+-- Studio playtests only: publishing the place would put the map's (Valve) textures on Roblox.
+
+local CHUNK = 200000 -- StringValue.Value limit, in characters
+
+local LOADER_SOURCE = [==[
+-- HammerPlaytestLoader: made by Hammer Tools "Embed for playtest". Builds the embedded map on
+-- this client when a playtest starts (textures and prop meshes can't be saved in the place).
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local holder = ReplicatedStorage:WaitForChild("HammerPlaytest")
+local MapImporter = require(holder:WaitForChild("MapImporter"))
+local data = holder:WaitForChild("Data")
+local count = data:GetAttribute("Count")
+
+local t0 = os.clock()
+local pieces = table.create(count)
+for i = 1, count do
+	pieces[i] = data:WaitForChild(string.format("%04d", i)).Value
+end
+local contents = buffer.tostring(MapImporter.base64Decode(table.concat(pieces)))
+print(string.format("[HammerPlaytest] package %.1f MB read in %.1f s", #contents / 1e6, os.clock() - t0))
+
+local runtime = Instance.new("Folder")
+runtime.Name = "MapRuntime"
+runtime.Parent = workspace
+local ok, root = pcall(MapImporter.build, contents, {
+	parent = runtime,
+	moveSpawn = false,       -- the spawn was already moved when the map was imported
+	indoorLighting = false,  -- and the lighting set up
+	onProgress = function(msg) print("[HammerPlaytest] " .. msg) end,
+})
+if not ok then
+	warn("[HammerPlaytest] " .. tostring(root))
+	return
+end
+-- the copy saved in the place has no textures or props during a playtest: drop it (here only)
+local saved = workspace:FindFirstChild("Map")
+saved = saved and saved:FindFirstChild(root.Name)
+if saved then saved:Destroy() end
+print(string.format("[HammerPlaytest] map built in %.1f s", os.clock() - t0))
+]==]
+
+local function embedForPlaytest(contents: string)
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local StarterPlayerScripts = game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts")
+	local old = ReplicatedStorage:FindFirstChild("HammerPlaytest")
+	if old then old:Destroy() end
+	local oldLoader = StarterPlayerScripts:FindFirstChild("HammerPlaytestLoader")
+	if oldLoader then oldLoader:Destroy() end
+
+	local text = MapImporter.base64Encode(buffer.fromstring(contents))
+	local holder = Instance.new("Folder")
+	holder.Name = "HammerPlaytest"
+	local data = Instance.new("Folder")
+	data.Name = "Data"
+	data.Parent = holder
+	local count = math.ceil(#text / CHUNK)
+	for i = 1, count do
+		local v = Instance.new("StringValue")
+		v.Name = string.format("%04d", i)
+		v.Value = string.sub(text, (i - 1) * CHUNK + 1, i * CHUNK)
+		v.Parent = data
+	end
+	data:SetAttribute("Count", count)
+	local moduleCopy = script.Parent.MapImporter:Clone()
+	moduleCopy.Parent = holder
+	holder.Parent = ReplicatedStorage
+
+	local loader = Instance.new("LocalScript")
+	loader.Name = "HammerPlaytestLoader"
+	loader.Source = LOADER_SOURCE
+	loader.Parent = StarterPlayerScripts
+	return count, #text
+end
+
+embedButton.Click:Connect(function()
+	local file = StudioService:PromptImportFileAsync({ "htmp" })
+	if not file then
+		embedButton:SetActive(false)
+		return
+	end
+	local rec = ChangeHistoryService:TryBeginRecording("Embed map for playtest")
+	local ok, count, size = pcall(embedForPlaytest, file:GetBinaryContents())
+	if rec then
+		ChangeHistoryService:FinishRecording(rec, if ok then Enum.FinishRecordingOperation.Commit else Enum.FinishRecordingOperation.Cancel)
+	end
+	if ok then
+		print(string.format("[MapImporter] embedded for playtest: %.1f MB of text in %d StringValues "
+			.. "(ReplicatedStorage.HammerPlaytest). Delete it and StarterPlayerScripts.HammerPlaytestLoader to remove.",
+			size / 1e6, count))
+	else
+		warn("[MapImporter] " .. tostring(count))
+	end
+	embedButton:SetActive(false)
 end)
 
 refreshButton.Click:Connect(function()
